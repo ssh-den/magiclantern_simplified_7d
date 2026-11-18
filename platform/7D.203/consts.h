@@ -265,8 +265,8 @@
 #define FRAME_BV ((int)FRAME_SHUTTER + (int)FRAME_APERTURE - (int)FRAME_ISO)
 
 // see "Malloc Information"
-#define MALLOC_STRUCT 0x249e4
-#define MALLOC_FREE_MEMORY (MEM(MALLOC_STRUCT + 8) - MEM(MALLOC_STRUCT + 0x1C)) // "Total Size" - "Allocated Size"
+#define MALLOC_STRUCT_ADDR 0x249e4
+//#define MALLOC_FREE_MEMORY (MEM(MALLOC_STRUCT + 8) - MEM(MALLOC_STRUCT + 0x1C)) // "Total Size" - "Allocated Size"
 #define SRM_BUFFER_SIZE 0x1F80000   /* print it from srm_malloc_cbr */
 #define SRM_MAX_BUF_COUNT_VIDEO_MODE 16 // probably not the true max, D45 cams all guess 16 and non-fatally fail if using too much
 

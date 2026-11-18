@@ -138,4 +138,7 @@
 //~ #define CONFIG_FOCUS_COMMANDS_PROP_NOT_CONFIRMED
 
 #define CONFIG_TASK_STRUCT_V2
+
+/* same layout as 60D / 550D: total size at +8, allocated size at +0x1C (see MALLOC_STRUCT_ADDR) */
+#define CONFIG_MALLOC_STRUCT_V2
 #define CONFIG_TASK_ATTR_STRUCT_V2
