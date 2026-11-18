@@ -11,6 +11,7 @@
 #include <raw.h>
 #include <fps.h>
 #include <shoot.h>
+#include <lens.h>
 
 #undef CROP_DEBUG
 
@@ -24,6 +25,7 @@ static int is_5D3 = 0;
 static int is_6D = 0;
 static int is_EOSM = 0;
 static int is_basic = 0;
+static int is_7D = 0;
 
 static CONFIG_INT("crop.preset", crop_preset_index, 0);
 static CONFIG_INT("crop.shutter_range", shutter_range, 0);
@@ -42,6 +44,7 @@ enum crop_preset {
     CROP_PRESET_3x1,
     CROP_PRESET_40_FPS,
     CROP_PRESET_CENTER_Z,
+    CROP_PRESET_CANON_1X1,
     NUM_CROP_PRESETS
 };
 
@@ -52,6 +55,7 @@ static enum crop_preset crop_preset = 0;
 
 /* must be assigned in crop_rec_init */
 static enum crop_preset * crop_presets = 0;
+static unsigned crop_presets_count = 0;
 
 /* current menu selection (*/
 #define CROP_PRESET_MENU crop_presets[crop_preset_index]
@@ -123,6 +127,29 @@ static const char crop_choices_help_basic[] =
 
 static const char crop_choices_help2_basic[] =
     "3x3 binning in 720p (square pixels in RAW, vertical crop)";
+
+/* 7D (dual DIGIC 4) uses Canon's own x5 sensor window instead of
+ * DIGIC 5 register overrides. */
+static enum crop_preset crop_presets_7d[] = {
+    CROP_PRESET_OFF,
+    CROP_PRESET_CANON_1X1,
+};
+
+static const char * crop_choices_7d[] = {
+    "OFF",
+    "RAW 1:1 (Canon x5)",
+};
+
+static const char crop_choices_help_7d[] =
+    "1:1 sensor readout for RAW video (Canon x5 window)";
+
+static const char crop_choices_help2_7d[] =
+    "\n"
+    "Movie LiveView: switches to x5 after closing the menu.\n"
+    "x10 changes preview magnification; the RAW window stays 1:1.\n"
+    "Move the window with Canon's focus box. Disable to restore prior zoom.";
+
+#include "crop_rec_7d.h"
 
 
 /* camera-specific parameters */
@@ -1414,6 +1441,12 @@ static int patch_active = 0;
 
 static void update_patch()
 {
+    if (is_7D)
+    {
+        /* Property handlers must never wait for another property delivery. */
+        crop_7d_sync();
+        return;
+    }
     if (CROP_PRESET_MENU)
     {
         /* update preset */
@@ -1463,6 +1496,21 @@ PROP_HANDLER(PROP_LV_DISPSIZE)
 
 static MENU_UPDATE_FUNC(crop_update)
 {
+    if (is_7D)
+    {
+        if (CROP_PRESET_MENU)
+        {
+            if (!is_movie_mode() || video_mode_crop)
+                MENU_SET_WARNING(MENU_WARN_NOT_WORKING, "Use Movie LiveView without Canon movie crop.");
+            else if (crop_7d_blocked)
+                MENU_SET_WARNING(MENU_WARN_NOT_WORKING, "Zoom request failed. Toggle crop OFF/ON to retry.");
+            else if (!crop_7d_active())
+                MENU_SET_WARNING(MENU_WARN_NOT_WORKING, "Close menu to enable RAW 1:1; recording must be stopped.");
+        }
+        else if (crop_7d_saved_zoom)
+            MENU_SET_WARNING(MENU_WARN_NOT_WORKING, "Previous zoom will be restored in idle LiveView.");
+        return;
+    }
     if (CROP_PRESET_MENU && lv)
     {
         if (CROP_PRESET_MENU == CROP_PRESET_CENTER_Z)
@@ -1599,6 +1647,9 @@ static struct menu_entry crop_rec_menu[] =
 
 static int crop_rec_needs_lv_refresh()
 {
+    if (is_7D)
+        return lv && ((crop_7d_wanted() && !crop_7d_active()) ||
+            (!crop_7d_wanted() && crop_7d_saved_zoom));
     if (!lv)
     {
         return 0;
@@ -1706,6 +1757,11 @@ static void set_zoom(int zoom)
 /* when closing ML menu, check whether we need to refresh the LiveView */
 static unsigned int crop_rec_polling_cbr(unsigned int unused)
 {
+    if (is_7D)
+    {
+        crop_7d_poll();
+        return CBR_RET_CONTINUE;
+    }
     /* also check at startup */
     static int lv_dirty = 1;
 
@@ -1760,7 +1816,18 @@ static unsigned int crop_rec_polling_cbr(unsigned int unused)
 static LVINFO_UPDATE_FUNC(crop_info)
 {
     LVINFO_BUFFER(16);
-    
+
+    if (is_7D)
+    {
+        if (crop_7d_active()) snprintf(buffer, sizeof(buffer), "RAW 1:1");
+        if (crop_rec_needs_lv_refresh())
+        {
+            STR_APPEND(buffer, " " SYM_WARNING);
+            item->color_fg = COLOR_YELLOW;
+        }
+        return;
+    }
+
     if (patch_active)
     {
         if (lv_dispsize > 1)
@@ -2018,7 +2085,26 @@ static unsigned int crop_rec_init()
         crop_rec_menu[0].max        = COUNT(crop_choices_basic) - 1;
         crop_rec_menu[0].help       = crop_choices_help_basic;
         crop_rec_menu[0].help2      = crop_choices_help2_basic;
-    }      
+    }
+    else if (is_camera("7D", "2.0.6"))
+    {
+        is_7D = 1;
+        crop_presets                = crop_presets_7d;
+        crop_rec_menu[0].choices    = crop_choices_7d;
+        crop_rec_menu[0].max        = COUNT(crop_choices_7d) - 1;
+        crop_rec_menu[0].help       = crop_choices_help_7d;
+        crop_rec_menu[0].help2      = crop_choices_help2_7d;
+        /* register/timer controls of the other cameras do not apply */
+        crop_rec_menu[0].children   = NULL;
+    }
+
+    if (is_7D)
+    {
+        crop_presets_count = crop_rec_menu[0].max + 1;
+        if (crop_preset_index < 0 || (unsigned)crop_preset_index >= crop_presets_count)
+            crop_preset_index = 0;
+    }
+
     menu_add("Movie", crop_rec_menu, COUNT(crop_rec_menu));
     lvinfo_add_items (info_items, COUNT(info_items));
 
@@ -2027,6 +2113,8 @@ static unsigned int crop_rec_init()
 
 static unsigned int crop_rec_deinit()
 {
+    crop_presets_count = 0;
+    if (is_7D) return crop_7d_deinit();
     return 0;
 }
 
