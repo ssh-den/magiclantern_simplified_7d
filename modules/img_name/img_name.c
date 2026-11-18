@@ -6,6 +6,7 @@
 #include <bmp.h>
 #include <menu.h>
 #include <fileprefix.h>
+#include <lens.h>
 #include <config.h>
 
 #include "../input/ime_base/ime_base.h"
@@ -113,11 +114,20 @@ static int folder_num = -1;
 static int folder_num_canon = -1;
 static int folder_num_requested = -1;
 static int folder_num_dirty = 0;
+static int counter_writes_available = 1;
+static int is_7d206;
+extern WEAK_FUNC(ret_0) int full_property_write_allowed(unsigned property);
 
 static void file_folder_number_refresh()
 {
     int file_num_canon_latest = get_shooting_card()->file_number;
     int folder_num_canon_latest = get_shooting_card()->folder_number;
+    if (!counter_writes_available)
+    {
+        file_num = file_num_canon_latest;
+        folder_num = folder_num_canon_latest;
+        return;
+    }
     if (file_num_canon != file_num_canon_latest)
     {
         /* Canon code updated their file number */
@@ -145,14 +155,22 @@ static void file_folder_number_refresh()
     ASSERT(folder_num != -1);
 
     char shooting_drive_letter = get_shooting_card()->drive_letter[0];
+    if (is_7d206 && (shooting_drive_letter != 'A' || folder_num_canon_latest < 100 ||
+                    !job_state_ready_to_take_pic()))
+    {
+        file_num = file_num_canon_latest;
+        folder_num = folder_num_canon_latest;
+        return;
+    }
 
     if (folder_num != folder_num_canon_latest)
     {
         folder_num_requested = folder_num;
         printf("Changing folder number from %d to %d...\n", folder_num_canon_latest, folder_num_requested);
         int folder_number_prop = shooting_drive_letter == 'A' ? PROP_FOLDER_NUMBER_A : PROP_FOLDER_NUMBER_B;
-        prop_request_change_wait(folder_number_prop, &folder_num_requested, 4, 1000);
-        folder_num_dirty = 1;
+        int confirmed = prop_request_change_wait(folder_number_prop, &folder_num_requested, 4, 1000);
+        folder_num_dirty = !is_7d206 || confirmed;
+        if (is_7d206 && !folder_num_dirty) NotifyBox(2000, "Canon did not confirm folder number");
     }
 
     if (file_num != file_num_canon_latest)
@@ -160,9 +178,11 @@ static void file_folder_number_refresh()
         file_num_requested = file_num;
         printf("Changing file number from %d to %d...\n", file_num_canon_latest, file_num_requested);
         int file_number_prop = shooting_drive_letter == 'A' ? PROP_FILE_NUMBER_A : PROP_FILE_NUMBER_B;
-        prop_request_change_wait(PROP_NUMBER_OF_CONTINUOUS_MODE, &file_num_requested, 4, 1000);
-        prop_request_change_wait(file_number_prop, &file_num_requested, 4, 1000);
-        file_num_dirty = 1;
+        int confirmed = prop_request_change_wait(PROP_NUMBER_OF_CONTINUOUS_MODE, &file_num_requested, 4, 1000);
+        if (!is_7d206 || confirmed)
+            confirmed = prop_request_change_wait(file_number_prop, &file_num_requested, 4, 1000);
+        file_num_dirty = !is_7d206 || confirmed;
+        if (is_7d206 && !file_num_dirty) NotifyBox(2000, "Canon did not confirm file number");
     }
 
     /* re-read the (possibly updated) file and folder number from Canon */
@@ -296,6 +316,14 @@ static struct menu_entry img_name_menu[] =
 
 static unsigned int img_name_init()
 {
+    is_7d206 = is_camera("7D", "2.0.6");
+    if (is_7d206)
+    {
+        counter_writes_available = full_property_write_allowed(PROP_FOLDER_NUMBER_A) &&
+            full_property_write_allowed(PROP_FILE_NUMBER_A) &&
+            full_property_write_allowed(PROP_NUMBER_OF_CONTINUOUS_MODE);
+        if (!counter_writes_available) img_name_menu[0].children[1] = (struct menu_entry) MENU_EOL;
+    }
     /* get default prefix at startup */
     /* fixme: what if user changes it from Canon menu? */
     snprintf(default_prefix, sizeof(default_prefix), "%s", get_file_prefix());
