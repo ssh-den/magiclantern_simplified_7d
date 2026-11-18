@@ -150,8 +150,9 @@ $(BUILD_DIR)/second_updater: $(BUILD_DIR)/second_updater.o | $(BUILD_DIR)
 	$(LD) -o $@ -nostdlib -e _start -Ttext $(FIR_BASE) $^
 
 $(BUILD_DIR)/second_updater.bin: $(BUILD_DIR)/second_updater $(BUILD_DIR)/xor_chk | $(BUILD_DIR)
-	$(OBJCOPY) -O binary $< $@; \
-    $(STAT_CMD) $@
+	$(OBJCOPY) -O binary $< $@.tmp
+	$(MV) $@.tmp $@
+	$(STAT_CMD) $@
 
 endif
 
@@ -237,18 +238,7 @@ endif
 ML_OBJS += $(ML_SRC_OBJS)
 ML_OBJS += $(ML_SRC_EXTRA_OBJS)
 
-# FIXME:
-# List of files that we will extract from dietlibc archive.
-# Note there is a nasty hack hiding here.  It looks like we're
-# prefixing each archive member name with the directory it will
-# be extracted to.  But that's a lie: bizarrely, ar ignores this,
-# but still succeeds in the extraction.
-#
-# The prefix is there so Make realises build/strlen.o exists,
-# so that it can succeed in building anything dependent on it.
-# Yuck.  Surely there is a better way of indicating that?
-# subst maybe, start with the bare list, append BUILD_DIR to each
-# item, store in two different vars for the different purposes?
+# Extract each dietlibc member separately so parallel jobs write distinct files.
 DIET_OBJS = \
     $(BUILD_DIR)/strrchr.o \
     $(BUILD_DIR)/strncpy.o \
@@ -270,7 +260,7 @@ DIET_OBJS = \
     $(BUILD_DIR)/atol.o
 
 $(DIET_OBJS): $(DIETLIBC_A) | $(BUILD_DIR)
-	$(AR) x $? $(DIET_OBJS) --output $(BUILD_DIR)
+	$(AR) x $< $(@F) --output $(BUILD_DIR)
 
 $(BUILD_DIR)/dietlibc.a: $(DIET_OBJS) | $(BUILD_DIR)
 	$(AR) cr $@ $^
@@ -292,7 +282,7 @@ NEWLIB_PATH=$(SRC_DIR)/libs/arm-none-eabi-O3
 NEWLIB_LIBM_A=$(NEWLIB_PATH)/libm.a
 NEWLIB_LIBC_A=$(NEWLIB_PATH)/libc.a
 $(NEWLIB_OBJS): $(NEWLIB_LIBC_A) | $(BUILD_DIR)
-	$(AR) x $? $(NEWLIB_OBJS) --output $(BUILD_DIR)
+	$(AR) x $< $(@F) --output $(BUILD_DIR)
 
 $(BUILD_DIR)/newlib-libc.a: $(NEWLIB_OBJS) | $(BUILD_DIR)
 	$(AR) cr $@ $^
@@ -412,8 +402,9 @@ $(BUILD_DIR)/autoexec: $(ML_REBOOT_OBJ) | $(BUILD_DIR)
 	$(LD) -o $@ -e _start -N -Ttext $(FIR_BASE) $^ --cref -Map=$(BUILD_DIR)/autoexec.map
 
 $(BUILD_DIR)/autoexec.bin: $(BUILD_DIR)/autoexec $(BUILD_DIR)/xor_chk | $(BUILD_DIR)
-	$(OBJCOPY) -O binary $< $@; \
-	$(BUILD_DIR)/xor_chk $@
+	$(OBJCOPY) -O binary $< $@.tmp
+	$(BUILD_DIR)/xor_chk $@.tmp
+	$(MV) $@.tmp $@
 
 FORCE:
 
