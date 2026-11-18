@@ -1,3 +1,24 @@
+> [!WARNING]
+> **Unofficial, experimental fork for the Canon EOS 7D (firmware 2.0.6).**
+>
+> - This is **not** an official Magic Lantern release and is not affiliated
+>   with, endorsed by, or supported by the Magic Lantern team or Canon.
+> - Builds from this repository are **test builds**. They have been tried on
+>   a single camera and only for a limited set of features. Anything not
+>   explicitly described as tested should be treated as untested.
+> - Running unofficial software on your camera carries real risk, including
+>   crashes, corrupted recordings, lost data and, in the worst case, a camera
+>   that needs service. **Use it entirely at your own risk.**
+> - Before trying it: back up your memory card, use a card you can format,
+>   and make sure you know how to remove the boot flag / return to Canon
+>   firmware.
+> - This software is provided **"as is", without warranty of any kind**, as
+>   stated in the GNU GPL (see [COPYING](COPYING), sections 11 and 12). The
+>   author of this fork accepts no responsibility or liability for any damage
+>   or loss resulting from its use.
+> - Please do **not** report problems with this fork to the upstream Magic
+>   Lantern project. Use this repository's issue tracker instead.
+
 Magic Lantern
 =============
 
