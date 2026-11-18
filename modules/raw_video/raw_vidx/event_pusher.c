@@ -41,6 +41,8 @@
 //#define MLV_3_CROP_HEIGHT 896
 
 static struct msg_queue *event_q = NULL;
+static int crop_x = 200, crop_y = 100;
+static int crop_width = MLV_3_CROP_WIDTH, crop_height = MLV_3_CROP_HEIGHT;
 
 // We post these events to the msg queue.  Since we push a pointer,
 // we need some storage that will live until the msg has been consumed.
@@ -144,6 +146,14 @@ void allow_recording(void)
 
 void init_event_pusher(struct msg_queue *q)
 {
+    if (is_camera("7D", "2.0.6"))
+    {
+        /* Start inside the 7D's 1080p LiveView active area and fit its CF throughput. */
+        crop_x = 256;
+        crop_y = 26;
+        crop_width = 1280;
+        crop_height = 720;
+    }
     // Not much init, most of the work is done by the CBR funcs.
     event_q = q;
     events_sem = create_named_semaphore(NULL, SEM_CREATE_UNLOCKED);
@@ -261,8 +271,8 @@ static unsigned int raw_vid_keypress_cbr(unsigned int key)
                 event->creation_time = get_ms_clock();
                 event->type = COMMAND_START;
                 // FIXME we should take these from menu config when we have that
-                event->w = MLV_3_CROP_WIDTH;
-                event->h = MLV_3_CROP_HEIGHT;
+                 event->w = crop_width;
+                 event->h = crop_height;
                 msg_queue_post(event_q, (uint32_t)event);
             }
             // If we were trying to start recording and there was an earlier
@@ -301,6 +311,7 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
 
     static char *capture_frames[2] = {NULL};
     static char *frame = NULL; // current capture_frame in use
+    static int capture_pitch, capture_height;
 
     if (get_recording_state() != ACTIVE)
         return 0;
@@ -333,6 +344,13 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
     {
         return 0;
     }
+    if ((count && (raw_info.pitch != capture_pitch || raw_info.height != capture_height)) ||
+        raw_info.bits_per_pixel != BPP || raw_info.width < crop_x + crop_width ||
+        raw_info.height < crop_y + crop_height || raw_info.pitch < (crop_x + crop_width) * BPP / 8)
+    {
+        task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
+        return 0;
+    }
 
     count++;
     if (count == 1)
@@ -341,7 +359,9 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
 
         // We lie a little to increase height, we want to slightly over-allocate.
         // Old code does this, not quite sure why, perhaps DMA block size related?
-        const uint32_t lv_raw_size = raw_info.width * (raw_info.height + 2) * BPP/8;
+        capture_pitch = raw_info.pitch;
+        capture_height = raw_info.height;
+        const uint32_t lv_raw_size = capture_pitch * (capture_height + 2);
         capture_frames[0] = fio_malloc(lv_raw_size);
 
         if (capture_frames[0] == NULL)
@@ -387,11 +407,10 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
 
     event->orig_frame_width = raw_info.pitch;
 
-    // TODO allow choosing offset and crop?
-    event->x = 200; // x offset within the frame, for cropping
-    event->y = 100; // y as above
-    event->w = MLV_3_CROP_WIDTH;
-    event->h = MLV_3_CROP_HEIGHT;
+    event->x = crop_x;
+    event->y = crop_y;
+    event->w = crop_width;
+    event->h = crop_height;
 
     int32_t frame_size = event->w * event->h * BPP/8;
     event->size = frame_size;
