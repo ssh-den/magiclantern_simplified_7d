@@ -243,10 +243,35 @@ extern WEAK_FUNC(ret_0) uint32_t BulkOutIPCTransfer(int type, uint8_t *buffer, i
 extern WEAK_FUNC(ret_0) uint32_t BulkInIPCTransfer(int type, uint8_t *buffer, int length, uint32_t master_addr, void (*cb)(uint32_t*, uint32_t, uint32_t), uint32_t cb_parm);
 
 static uint8_t* local_buf = 0;
+static volatile uint32_t bulk_pending;
+static int bulk_failed;
 
 static void bulk_cb(uint32_t *parm, uint32_t address, uint32_t length)
 {
-    *parm = 0;
+    *(volatile uint32_t *)parm = 0;
+}
+
+static int transfer_iso_table(uint32_t master_addr, int length, int write)
+{
+    if (bulk_failed) return 0;
+
+    /* Keep the DMA buffer and completion flag alive if Canon finishes late. */
+    bulk_pending = 1;
+    if (write)
+        BulkOutIPCTransfer(0, local_buf, length, master_addr, &bulk_cb, (uint32_t)&bulk_pending);
+    else
+        BulkInIPCTransfer(0, local_buf, length, master_addr, &bulk_cb, (uint32_t)&bulk_pending);
+
+    for (int elapsed = 0; bulk_pending && elapsed < 500; elapsed += 20)
+        msleep(20);
+
+    if (bulk_pending)
+    {
+        bulk_failed = 1;
+        NotifyBox(5000, "Dual ISO IPC timed out. Restart camera.");
+        return 0;
+    }
+    return 1;
 }
 
 // Return value is non-zero for error, but errors can be positive or negative.
@@ -425,10 +450,7 @@ static int dual_iso_enable(uint32_t start_addr, int size, int count, uint32_t* b
         
         if (is_7d) /* start_addr is on master */
         {
-            volatile uint32_t wait = 1;
-            BulkInIPCTransfer(0, local_buf, size * count, start_addr, &bulk_cb, (uint32_t) &wait);
-            while(wait)
-                msleep(20);
+            if (!transfer_iso_table(start_addr, size * count, 0)) return 6;
             start_addr = (uint32_t) local_buf + 2; /* our numbers are aligned at 16 bits, but not at 32 */
         }
 
@@ -473,7 +495,8 @@ static int dual_iso_enable(uint32_t start_addr, int size, int count, uint32_t* b
         // We can't read values directly on ARMv5 due to unaligned read behaviour
         // interacting with apply_patches() / read_value() behaviour.
         for (int i = 0; i < count; i++)
-            backup[i] = read_value((uint8_t *)(start_addr + size * i), 0);
+            backup[i] = is_7d ? *(uint16_t *)(start_addr + size * i)
+                              : read_value((uint8_t *)(start_addr + size * i), 0);
 
         /* sanity check first */
         int prev_iso = 0;
@@ -534,6 +557,12 @@ static int dual_iso_enable(uint32_t start_addr, int size, int count, uint32_t* b
 
             patch_value |= cmos_bits; // add the CMOS bits from our target ISO
 
+            if (is_7d)
+            {
+                *(uint16_t *)(start_addr + i * size) = patch_value;
+                continue;
+            }
+
             if (is_eosm || is_650d || is_700d || is_100d)
             {
                 // Clear the "MSB" to fix line-skipping. 1 -> 8 lines, 0 -> 4 lines
@@ -560,12 +589,7 @@ static int dual_iso_enable(uint32_t start_addr, int size, int count, uint32_t* b
             apply_patches(&patch, 1);
         }
 
-        if (is_7d) /* commit the changes on master */
-        {
-            volatile uint32_t wait = 1;
-            BulkOutIPCTransfer(0, (uint8_t*)start_addr - 2, size * count, start_addr_0, &bulk_cb, (uint32_t) &wait);
-            while(wait) msleep(20);
-        }
+        if (is_7d && !transfer_iso_table(start_addr_0, size * count, 1)) return 6;
 
         /* success */
         return 0;
@@ -573,15 +597,16 @@ static int dual_iso_enable(uint32_t start_addr, int size, int count, uint32_t* b
 
 static int dual_iso_disable(uint32_t start_addr, int size, int count, uint32_t* backup)
 {
-    /* for 7D */
-    int start_addr_0 = start_addr;
-    
     if (is_7d) /* start_addr is on master */
     {
-        volatile uint32_t wait = 1;
-        BulkInIPCTransfer(0, local_buf, size * count, start_addr, &bulk_cb, (uint32_t) &wait);
-        while(wait) msleep(20);
-        start_addr = (uint32_t) local_buf + 2;
+        if (!transfer_iso_table(start_addr, size * count, 0)) return 6;
+        uint16_t mask = CMOS_ISO_MASK << CMOS_FLAG_BITS;
+        for (int i = 0; i < count; i++)
+        {
+            uint16_t *value = (uint16_t *)(local_buf + 2 + i * size);
+            *value = (*value & ~mask) | (backup[i] & mask);
+        }
+        return transfer_iso_table(start_addr, size * count, 1) ? 0 : 6;
     }
 
     // undo our patches
@@ -599,13 +624,6 @@ static int dual_iso_disable(uint32_t start_addr, int size, int count, uint32_t* 
             unpatch_memory(start_addr + i * size);
     }
     
-    if (is_7d) /* commit the changes on master */
-    {
-        volatile uint32_t wait = 1;
-        BulkOutIPCTransfer(0, (uint8_t*)start_addr - 2, size * count, start_addr_0, &bulk_cb, (uint32_t) &wait);
-        while(wait) msleep(20);
-    }
-
     /* success */
     return 0;
 }
@@ -664,7 +682,7 @@ static unsigned int dual_iso_refresh(unsigned int ctx)
         enabled_ph = 0;
     }
 
-    if (dual_iso_hdr && raw_ph && !enabled_ph && PHOTO_CMOS_ISO_START
+    if (!bulk_failed && dual_iso_hdr && raw_ph && !enabled_ph && PHOTO_CMOS_ISO_START
         && ((get_shooting_card()->file_number % 2) || !dual_iso_every_other))
     {
         enabled_ph = 1;
@@ -1263,10 +1281,11 @@ static unsigned int dual_iso_init()
         CMOS_FLAG_BITS = 4;
         CMOS_EXPECTED_FLAG = 3;
     }
-    else if (is_camera("7D", "2.0.3"))
+    else if (is_camera("7D", "2.0.3") || is_camera("7D", "2.0.6"))
     {
         is_7d = 1;
         
+        /* 2.0.6 keeps this table at the same master address. */
         PHOTO_CMOS_ISO_START = 0x406944f4; // CMOS register 0000 - for photo mode, ISO 100
         PHOTO_CMOS_ISO_COUNT =          6; // from ISO 100 to 3200
         PHOTO_CMOS_ISO_SIZE  =         14; // distance between ISO 100 and ISO 200 addresses, in bytes
@@ -1275,7 +1294,9 @@ static unsigned int dual_iso_init()
         CMOS_FLAG_BITS = 2;
         CMOS_EXPECTED_FLAG = 0;
         
+        if (!dual_iso_sem) return 1;
         local_buf = fio_malloc(PHOTO_CMOS_ISO_COUNT * PHOTO_CMOS_ISO_SIZE + 4);
+        if (!local_buf) return 1;
     }
     else if (is_camera("5D2", "2.1.2"))
     {
