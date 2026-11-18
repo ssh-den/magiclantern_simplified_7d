@@ -67,6 +67,7 @@ ZIP_MODULES_DIR = $(ZIP_DIR)/ML/modules
 # All modules go here before placing in zip file hierarchy,
 # for any post-module-build but per-cam, pre-zip processing:
 CAM_MODULES_DIR = $(BUILD_DIR)/modules
+MODULES_BUILD_DIR = $(MODULES_DIR)/$(if $(filter 7D,$(MODEL)),build/7d,$(BUILD_DIR))
 
 ML_CAMS = \
     100D.101 \
@@ -176,13 +177,13 @@ disk_image: $(BUILD_DIR)/magiclantern.zip | $(BUILD_DIR)
 # see empty files or partial content and fail to build.
 # You're especially likely to hit this if modules has just been cleaned.
 
-$(MODULES_DIR)/$(BUILD_DIR)/default_modules_complete: | $(BUILD_DIR)
-	$(MAKE) -C $(MODULES_DIR)
+$(MODULES_BUILD_DIR)/default_modules_complete: | $(BUILD_DIR)
+	$(MAKE) -C $(MODULES_DIR) $(if $(filter 7D,$(MODEL)),MODULES_CAMERA=7D)
 
 # The static pattern rule that runs for every cam depends on this,
 # to avoid them racing on modules directly, instead this touch
 # target will (hopefully) make the races cheaper.
-$(BUILD_DIR)/platform_modules_complete: $(MODULES_DIR)/$(BUILD_DIR)/default_modules_complete | $(BUILD_DIR)
+$(BUILD_DIR)/platform_modules_complete: $(MODULES_BUILD_DIR)/default_modules_complete | $(BUILD_DIR)
 	touch $(BUILD_DIR)/platform_modules_complete
 
 # ML_PLATFORM_TARGETS is a string where each part is of the format:
@@ -249,9 +250,12 @@ $(BUILD_DIR)/$(ML_MODULES_SYM_NAME): $(BUILD_DIR)/magiclantern.sym | $(BUILD_DIR
 
 zip_contents:: $(BUILD_DIR)/$(ML_MODULES_SYM_NAME) \
                modules.hidden modules.included \
-               $(MODULES_DIR)/$(BUILD_DIR)/default_modules_complete | $(BUILD_DIR)
+               $(MODULES_BUILD_DIR)/default_modules_complete | $(BUILD_DIR)
 	$(CP) $(BUILD_DIR)/$(ML_MODULES_SYM_NAME) $(ZIP_MODULES_DIR)/
-	$(CP) $(MODULES_DIR)/$(BUILD_DIR)/*.mo $(CAM_MODULES_DIR)/
+ifeq ($(MODEL),7D)
+	$(RM) $(addprefix $(CAM_MODULES_DIR)/,sd_clock.mo yolo.mo) $(addprefix $(ZIP_MODULES_DIR)/,sd_clock.mo yolo.mo)
+endif
+	$(CP) $(MODULES_BUILD_DIR)/*.mo $(CAM_MODULES_DIR)/
 	$(PYTHON) $(PLATFORM_DIR)/create_hid_files.py modules.hidden $(ZIP_MODULES_DIR)
 	$(PYTHON) $(PLATFORM_DIR)/copy_included_modules.py modules.included $(CAM_MODULES_DIR) $(ZIP_MODULES_DIR)
 endif

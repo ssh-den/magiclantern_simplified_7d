@@ -56,6 +56,13 @@ ML_MODULES = \
     raw_video/raw_vidx \
     yolo
 
+MODULES_OUTPUT = $(BUILD_DIR)
+ifeq ($(MODULES_CAMERA),7D)
+# The EOS 7D uses CF and has no built-in Wi-Fi.
+ML_MODULES := $(filter-out sd_clock yolo,$(ML_MODULES))
+MODULES_OUTPUT = $(BUILD_DIR)/7d
+endif
+
 .PHONY: clean $(BUILD_DIR)
 
 # Construct various targets for the default modules.
@@ -82,12 +89,16 @@ $(shell rm $(ML_MODULE_TARGETS) > /dev/null 2>&1)
 endif
 
 # Default target if make run in "modules" dir
-#$(BUILD_DIR)/default_modules_complete: $(ML_MODULE_TARGETS) $(ML_MODULE_PATHS) | $(BUILD_DIR)
-$(BUILD_DIR)/default_modules_complete: $(ML_MODULE_TARGETS) | $(BUILD_DIR)
+$(MODULES_OUTPUT)/default_modules_complete: $(ML_MODULE_TARGETS) | $(MODULES_OUTPUT)
 	@$(PYTHON3) mark_cross_module_deps.py $(OBJCOPY) $(ML_MODULES)
-	@$(CP) $(ML_MODULE_PATHS) $(BUILD_DIR)/
-	@touch $(BUILD_DIR)/default_modules_complete
+	@$(CP) $(ML_MODULE_PATHS) $(MODULES_OUTPUT)/
+	@touch $@
 	@echo Modules built successfully
+
+ifeq ($(MODULES_CAMERA),7D)
+$(MODULES_OUTPUT): | $(BUILD_DIR)
+	@mkdir -p $@
+endif
 
 # Individual modules should make this target their default goal.
 # It's not run when invoking make from the modules dir directly,
@@ -118,9 +129,9 @@ $(BUILD_DIR)/module_complete: $(BUILD_DIR)/$(MODULE_NAME).sym \
 # lua/build/module_complete -> lua/build/lua.mo build/
 #
 # ML_MODULE_TARGETS format: lua/build/module_complete
-$(ML_MODULE_TARGETS): %: | $(BUILD_DIR)
+$(ML_MODULE_TARGETS): %: | $(MODULES_OUTPUT)
 	$(MAKE) -C $(subst /$(BUILD_DIR)/module_complete,,$*)
-	@$(CP) $(subst /module_complete,,$*)/$(notdir $(subst /$(BUILD_DIR)/module_complete,,$*)).mo $(BUILD_DIR)/
+	@$(CP) $(subst /module_complete,,$*)/$(notdir $(subst /$(BUILD_DIR)/module_complete,,$*)).mo $(MODULES_OUTPUT)/
 
 $(BUILD_DIR)/$(MODULE_NAME).mo: $(MODULE_OBJS) | $(BUILD_DIR)
 	$(LD) -r -o $@.tmp $(MODULE_OBJS)
