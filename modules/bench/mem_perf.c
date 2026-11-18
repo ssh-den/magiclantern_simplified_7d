@@ -54,13 +54,17 @@ static float mem_perf_run(uint32_t block_size, uint32_t address)
     uint32_t wall_start = get_ms_clock();
     uint32_t loops = 1024;
     uint32_t outer_loops = 0;
+    int preserve_lockdown = is_camera("7D", "2.0.6");
     
     while(wall_time < mem_perf_runtime)
     {
         uint32_t old_int = cli();
         
-        icache_unlock();
-        dcache_unlock();
+        if (!preserve_lockdown)
+        {
+            icache_unlock();
+            dcache_unlock();
+        }
 
         /* precache */
         mem_perf_asm_128(address, block_size, 16);
@@ -85,6 +89,9 @@ static float mem_perf_run(uint32_t block_size, uint32_t address)
 
 static void mem_perf_test(uint32_t address)
 {
+    /* Measure the usable cache while the boot patches occupy locked lines. */
+    if (is_camera("7D", "2.0.6"))
+        NotifyBox(1000, "Benchmark keeps ML cache patches locked");
     msleep(1000);
     
     canon_gui_disable_front_buffer();
