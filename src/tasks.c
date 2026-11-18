@@ -16,6 +16,9 @@
 /* for CBRs */
 #include "config.h"
 #include "lens.h"
+#ifdef CONFIG_7D206_FULL_CORE
+#include "module.h"
+#endif
 
 int ml_shutdown_requested = 0;
 
@@ -335,6 +338,12 @@ extern int module_shutdown();
 
 static void ml_shutdown()
 {
+#ifdef CONFIG_7D206_FULL_CORE
+    /* Config autosaves on menu close; do not enter feature code while linking. */
+    if (ml_shutdown_requested) return;
+    ml_shutdown_requested=1;
+    if (module_port.done && !module_port.loading) module_shutdown();
+#else
 #ifdef CONFIG_RP
     // FIXME: this should be promoted to a FEATURE flag,
     // or the shutter close feature should be directly
@@ -365,6 +374,7 @@ static void ml_shutdown()
 #if defined(CONFIG_MODULES)
     module_shutdown();
 #endif
+#endif
 }
 
 PROP_HANDLER(PROP_TERMINATE_SHUT_REQ)
@@ -373,9 +383,11 @@ PROP_HANDLER(PROP_TERMINATE_SHUT_REQ)
     /* 3 appears too late for saving config files */
     if (buf[0] == 0)
     {
+#ifndef CONFIG_7D206_FULL_CORE
         /* keep the LEDs on until shutdown completes */
         info_led_on();
         delayed_call(20, leds_on, 0);
+#endif
 
         ml_shutdown();
     }
@@ -388,6 +400,9 @@ PROP_HANDLER(PROP_ABORT)
 
     if (buf[0] == 1)
     {
+#ifdef CONFIG_7D206_FULL_CORE
+        ml_shutdown();
+#else
         /* 5D3: this prevents RING and RASEN from being saved
          * when opening battery door (check with e.g. PROP_VIDEO_SYSTEM) */
 #ifdef CONFIG_5D3
@@ -403,6 +418,7 @@ PROP_HANDLER(PROP_ABORT)
         /* if no hard crash, load the modules after taking the battery out */
         module_shutdown();
         #endif
+#endif
     }
 }
 

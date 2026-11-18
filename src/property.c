@@ -19,6 +19,9 @@
 #include "dryos.h"
 #include "property.h"
 #include "bmp.h"
+#ifdef CONFIG_7D206_FULL_CORE
+#include "full-runtime.h"
+#endif
 
 #ifdef CONFIG_DIGIC_678X
 #include "property_whitelist.h"
@@ -53,6 +56,9 @@ global_property_handler(
 {
     /* Canon stub */
     extern void* _prop_cleanup(void* token, int property);
+#ifdef CONFIG_7D206_FULL_CORE
+    if (!full_property_valid(property,buf,len)) return _prop_cleanup(global_token,property);
+#endif
     
 #ifdef CONFIG_5DC
     if (property == 0x80010001) return (void*)_prop_cleanup(global_token, property);
@@ -88,6 +94,10 @@ global_property_handler(
 
 void prop_add_handler (uint32_t property, void *handler)
 {
+#ifdef CONFIG_7D206_FULL_CORE
+    /* Generic newer-camera readers: neither ID has a literal in the 2.0.6 ROM. */
+    if (property == 0x80040040 || property == 0x8005002F) return;
+#endif
     // SJE TODO investigate and fix all currently denied
     // properties (those known to cause problems on D678 cams)
     #ifdef CONFIG_DIGIC_678X
@@ -304,7 +314,12 @@ static void prop_reset_ack(uint32_t property)
 // not Digic generation based.  We probably get cleaner code if we
 // can limit properties for older cams too, sometimes they special
 // case behaviour, where banning an individual property might be cleaner.
-#ifdef CONFIG_DIGIC_678X
+#if defined(CONFIG_7D206_FULL_CORE)
+static int is_prop_allowed(uint32_t property)
+{
+    return full_property_write_allowed(property);
+}
+#elif defined(CONFIG_DIGIC_678X)
 static int is_prop_allowed(uint32_t property)
 {
     for(int32_t i = 0;
@@ -365,6 +380,13 @@ void prop_request_change(unsigned property, const void* addr, size_t len)
     int correct_len = prop_get_prop_len((int)property);
     if (len == 0)
         len = correct_len;
+#ifdef CONFIG_7D206_FULL_CORE
+    /* Exact reviewed payload sizes; unknown/unobserved IDs and NULL never
+     * reach Canon. No drawing, waiting or file I/O in this refusal path. */
+    if (ml_shutdown_requested || !correct_len) return;
+    if (correct_len != (int)len && !(property == PROP_BATTERY_REPORT && len == 1)) return;
+    if (!full_property_write_valid(property,addr,len)) return;
+#endif
     if (len == 0)
     {
         char msg[100];

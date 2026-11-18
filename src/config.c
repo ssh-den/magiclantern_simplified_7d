@@ -913,7 +913,11 @@ static struct menu_entry cfg_menus[] = {
             .priv = &config_autosave,
             .max  = 1,
             .select = config_autosave_toggle,
+#ifdef CONFIG_7D206_FULL_CORE
+            .help = "Save ML settings automatically when you close the ML menu."
+#else
             .help = "If enabled, ML settings are saved automatically at shutdown."
+#endif
         },
         {
             .name = "Save config now",
@@ -938,6 +942,9 @@ void config_load()
 {
 #ifdef CONFIG_CONFIG_FILE
     config_selected = 1;
+#ifdef CONFIG_7D206_FULL_CORE
+    FIO_CreateDirectory("ML/SETTINGS");
+#endif
     config_preset_name = config_choose_startup_preset();
 
     if (config_preset_name)
@@ -959,6 +966,12 @@ void config_save()
 {
 #ifdef CONFIG_CONFIG_FILE
     take_semaphore(config_save_sem, 0);
+#ifdef CONFIG_7D206_FULL_CORE
+    if (ml_shutdown_requested || module_port.loading || !module_port.done) {
+        give_semaphore(config_save_sem);
+        return;
+    }
+#endif
     update_disp_mode_bits_from_params();
     char config_file[0x80];
     snprintf(config_file, sizeof(config_file), "%smagic.cfg", get_config_dir());

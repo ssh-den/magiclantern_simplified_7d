@@ -34,6 +34,7 @@
 //#define SIG_77D_102  0x6dd89c83 // from e0040000
 #define SIG_77D_110  0x301679a8 // from e0040000
 #define SIG_7D_203   0x50163E93 // from FF010000
+#define SIG_7D_206   0xAB3E8EFF // from FF010000
 #define SIG_7D2_104  0x9c68409c // from FE0A0000
 #define SIG_7D2_112  0xe7b1a44b // from FE0A0000
 #define SIG_7D_MASTER_203 0x640BF4D1 // from FF010000

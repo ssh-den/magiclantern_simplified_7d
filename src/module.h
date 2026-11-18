@@ -6,6 +6,14 @@
 
 #define MODULE_PATH                   "ML/MODULES/"
 
+#ifdef CONFIG_7D206_FULL_CORE
+/* Module autoload state; config saves and shutdown wait for it. */
+struct module_port_state {
+    int loading, done, result;
+};
+extern volatile struct module_port_state module_port;
+#endif
+
 /* module info structures */
 #define MODULE_INFO_PREFIX            __module_info_
 #define MODULE_STRINGS_PREFIX         __module_strings_

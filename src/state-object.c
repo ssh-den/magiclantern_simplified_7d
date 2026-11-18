@@ -14,6 +14,9 @@
 #include "property.h"
 #include "fps.h"
 #include "module.h"
+#ifdef CONFIG_7D206_FULL_CORE
+#include "full-runtime.h"
+#endif
 
 /* to refactor with CBR */
 extern void _lv_vsync_signal();
@@ -285,6 +288,20 @@ static int stateobj_start_spy(struct state_object * stateobj, void* spy)
 
 static void state_init(void* unused)
 {
+#ifdef CONFIG_7D206_FULL_CORE
+    /* Hook LVState only when it matches the 2.0.6 firmware object. */
+    int tries=100;
+    while (!LV_STATE && --tries) msleep(50);
+    struct state_object *obj=LV_STATE;
+    uint32_t address=(uint32_t)obj;
+    if (address<0x1000 || address>RESTARTSTART-sizeof(*obj) || (address&3) ||
+        obj->type!=(void*)0xFF5B7CB5 ||
+        obj->state_matrix!=(void*)0xFF54F9B0 || obj->max_inputs!=28 || obj->max_states!=15 ||
+        (uint32_t)obj->StateTransition_maybe!=0xFF20BCE4 || obj->current_state>=15) {
+        full_failure=1;
+        return;
+    }
+#endif
     #ifdef DISPLAY_STATE
         stateobj_start_spy(DISPLAY_STATE, stateobj_lv_spy);
     #endif

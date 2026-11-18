@@ -242,6 +242,26 @@ static void fail()
     while(1);
 }
 
+#ifdef CONFIG_7D206_FULL_CORE
+/* Separate 8 KiB caches, four ways, 32-byte lines (ARM946 descriptors 0x112). */
+static int cache_geometry_ok(uint32_t control, uint32_t type)
+{
+    return (control & 0x1004) == 0x1004 &&
+        (type & 0xFFFFFF) == 0x112112 && (type & 0x01000000);
+}
+
+/* Refuse before copying/executing code that assumes this cache geometry. */
+static void __attribute__((noreturn)) loader_refuse(void)
+{
+    while (1) {
+        MEM(CARD_LED_ADDRESS) = LEDON;
+        for (volatile unsigned i = 0; i < 1000000; i++);
+        MEM(CARD_LED_ADDRESS) = LEDOFF;
+        for (volatile unsigned i = 0; i < 6000000; i++);
+    }
+}
+#endif
+
 /* this duplicates 32-bit integers, unlike memset, which converts to char first */
 static void memset32(uint32_t * buf, uint32_t val, size_t size)
 {
@@ -273,6 +293,13 @@ cstart( void )
         qprint("            computed from: "); qprintn(SIG_START); qprint("\n");
         fail();
     }
+
+#ifdef CONFIG_7D206_FULL_CORE
+    uint32_t control, cache_type;
+    asm volatile("mrc p15,0,%0,c1,c0,0" : "=r"(control));
+    asm volatile("mrc p15,0,%0,c0,c0,1" : "=r"(cache_type));
+    if (!cache_geometry_ok(control, cache_type)) loader_refuse();
+#endif
 
     /* turn on the LED as soon as autoexec.bin is loaded (may happen without powering on) */
     #if defined(CONFIG_40D) || defined(CONFIG_5DC)

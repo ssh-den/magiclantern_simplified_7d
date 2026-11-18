@@ -42,6 +42,11 @@ CONFIG_INT("module.show_hidden", module_show_hidden, 0);
 char *module_lockfile = MODULE_PATH"LOADING.LCK";
 
 static struct msg_queue * module_mq = 0;
+#ifdef CONFIG_7D206_FULL_CORE
+volatile struct module_port_state module_port;
+extern int GetMemoryInformation(int *, int *);
+extern int GetSizeOfMaxRegion(int *);
+#endif
 // #define MSG_MODULE_LOAD_ALL 1
 // #define MSG_MODULE_UNLOAD_ALL 2
 #define MSG_MODULE_LOAD_OFFLINE_STRINGS 3 /* argument: module index in high half (FFFF0000) */
@@ -724,10 +729,16 @@ static int _module_load_all(uint32_t list_only)
         return -5;
     }
     
+#ifdef CONFIG_7D206_FULL_CORE
+    if (ml_shutdown_requested) { tcc_delete(state); return -6; }
+#endif
     /* load modules symbols */
     printf("Register modules...\n");
     for (uint32_t mod = 0; mod < module_cnt; mod++)
     {
+#ifdef CONFIG_7D206_FULL_CORE
+        if (ml_shutdown_requested) { tcc_delete(state); return -6; }
+#endif
         if(module_list[mod].valid && module_list[mod].enabled && !module_list[mod].error)
         {
             char module_info_name[32];
@@ -801,6 +812,9 @@ static int _module_load_all(uint32_t list_only)
     printf("Init modules...\n");
     for (uint32_t mod = 0; mod < module_cnt; mod++)
     {
+#ifdef CONFIG_7D206_FULL_CORE
+        if (ml_shutdown_requested) { tcc_delete(state); return -6; }
+#endif
         if(module_list[mod].valid && module_list[mod].enabled && !module_list[mod].error)
         {
             printf("  [i] Init: '%s'\n", module_list[mod].name);
@@ -1585,6 +1599,35 @@ static MENU_SELECT_FUNC(module_menu_select_empty)
 }
 
 
+#ifdef CONFIG_7D206_FULL_CORE
+static MENU_UPDATE_FUNC(module_port_status)
+{
+    if (module_port.loading)
+    {
+        MENU_SET_VALUE("Loading");
+        return;
+    }
+
+    int result = module_port.result;
+    const char *reason;
+    switch (result)
+    {
+        case -2: reason = "Cannot initialize TinyCC"; break;
+        case -3: reason = "Missing or invalid 7D_206.sym"; break;
+        case -4: reason = "Cannot read module directory"; break;
+        case -5: reason = "Module linking failed"; break;
+        case -6: reason = "Interrupted by shutdown"; break;
+        case -7: reason = "Cannot allocate module queue"; break;
+        case -8: reason = "Module memory check failed"; break;
+        case -9: reason = "Crash marker blocked autoload"; break;
+        case -10: reason = "Cannot write crash marker"; break;
+        default: reason = "Module loading interrupted"; break;
+    }
+    MENU_SET_VALUE("%s", reason);
+    MENU_SET_WARNING(MENU_WARN_NOT_WORKING, "Result %d.", result);
+}
+#endif
+
 /* check which modules are loaded and hide others */
 static void module_menu_update()
 {
@@ -1613,6 +1656,12 @@ static void module_menu_update()
             }
             i++;
         }
+#ifdef CONFIG_7D206_FULL_CORE
+        else if (entry->update == module_port_status)
+        {
+            MENU_SET_SHIDDEN(!module_port.loading && !module_port.result);
+        }
+#endif
         entry = entry->next;
     }
 
@@ -1954,6 +2003,13 @@ static struct menu_entry module_submenu[] = {
         },
 
 static struct menu_entry module_menu[] = {
+#ifdef CONFIG_7D206_FULL_CORE
+    {
+        .name = "Loader status",
+        .update = module_port_status,
+        .help = "Status of the current module startup.",
+    },
+#endif
     MODULE_ENTRY(0)
     MODULE_ENTRY(1)
     MODULE_ENTRY(2)
@@ -2097,6 +2153,14 @@ struct config_var* module_config_var_lookup(int* ptr)
 static void module_init()
 {
     module_mq = (struct msg_queue *) msg_queue_create("module_mq", 10);
+#ifdef CONFIG_7D206_FULL_CORE
+    module_port.loading = !!module_mq;
+    if (!module_mq)
+    {
+        module_port.result = -7;
+        module_port.done = 1;
+    }
+#endif
     menu_add("Modules", module_menu, COUNT(module_menu));
     menu_add("Debug", module_debug_menu, COUNT(module_debug_menu));
     module_menu_update();
@@ -2155,6 +2219,22 @@ static void module_unload_offline_strings(int mod_number)
 
 static void module_load_task(void* unused) 
 {
+#ifdef CONFIG_7D206_FULL_CORE
+    extern int ml_started;
+    if (!module_mq) return;
+    while (!ml_started && !ml_shutdown_requested) msleep(100);
+    if (ml_shutdown_requested) return;
+    /* Linking needs a large contiguous block; refuse early instead. */
+    int total, free_bytes, largest;
+    if (GetMemoryInformation(&total, &free_bytes) || GetSizeOfMaxRegion(&largest) ||
+        free_bytes < 1024*1024 || largest < 512*1024) {
+        module_port.result = -8;
+        module_port.loading = 0;
+        module_port.done = 1;
+        module_menu_update();
+        return;
+    }
+#endif
     char *lockstr = "If you can read this, ML crashed last time. To save from faulty modules, autoload gets disabled.";
 
     if(!module_autoload_disabled)
@@ -2165,28 +2245,49 @@ static void module_load_task(void* unused)
             /* uh, it seems the camera didnt shut down cleanly, skip module loading this time */
             msleep(1000);
             NotifyBox(10000, "Camera was not shut down cleanly.\r\nSkipping module loading." );
+#ifdef CONFIG_7D206_FULL_CORE
+            module_port.result = -9;
+#endif
         }
         else
         {
+#ifdef CONFIG_7D206_FULL_CORE
+            int lock_ok = 0;
+#endif
             FILE *handle = FIO_CreateFile(module_lockfile);
             if (handle)
             {
+#ifdef CONFIG_7D206_FULL_CORE
+                lock_ok = FIO_WriteFile(handle, lockstr, strlen(lockstr)) == (int)strlen(lockstr);
+#else
                 FIO_WriteFile(handle, lockstr, strlen(lockstr));
+#endif
                 FIO_CloseFile(handle);
             }
             
             /* now load modules */
+#ifdef CONFIG_7D206_FULL_CORE
+            module_port.result = lock_ok ? _module_load_all(0) : -10;
+#else
             _module_load_all(0);
-            module_menu_update();
+#endif
         }
     }
     else
     {
         /* only list modules */
+#ifdef CONFIG_7D206_FULL_CORE
+        module_port.result = _module_load_all(1);
+#else
         _module_load_all(1);
-        module_menu_update();
+#endif
     }
 
+#ifdef CONFIG_7D206_FULL_CORE
+    module_port.loading = 0;
+    module_port.done = 1;
+#endif
+    module_menu_update();
     /* main loop, also wait until clean shutdown */
     TASK_LOOP
     {

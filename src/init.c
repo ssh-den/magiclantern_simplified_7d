@@ -39,6 +39,9 @@
 #include "boot-hack.h"
 #include "ml-cbr.h"
 #include "backtrace.h"
+#ifdef CONFIG_7D206_FULL_CORE
+#include "full-runtime.h"
+#endif
 
 extern int uart_printf(const char * fmt, ...);
 
@@ -166,9 +169,18 @@ call_init_funcs()
     extern struct task_create _init_funcs_start[];
     extern struct task_create _init_funcs_end[];
     struct task_create * init_func = _init_funcs_start;
+#ifdef CONFIG_7D206_FULL_CORE
+    struct task_create *state_hook=0;
+    struct task_create *property_init=0;
+#endif
 
     for( ; init_func < _init_funcs_end ; init_func++ )
     {
+#ifdef CONFIG_7D206_FULL_CORE
+        /* Install per-frame callbacks after all queues/semaphores exist. */
+        if (streq(init_func->name,"state_init")) { state_hook=init_func; continue; }
+        if (streq(init_func->name,"../../src/property.c")) { property_init=init_func; continue; }
+#endif
 #if defined(POSITION_INDEPENDENT)
         init_func->entry = PIC_RESOLVE(init_func->entry);
         init_func->name = PIC_RESOLVE(init_func->name);
@@ -181,6 +193,13 @@ call_init_funcs()
         thunk entry = (thunk) init_func->entry;
         entry();
     }
+#ifdef CONFIG_7D206_FULL_CORE
+    /* Canon can deliver initial values synchronously at registration. */
+    if (property_init) ((thunk)property_init->entry)();
+    else full_failure=1;
+    if (state_hook) ((thunk)state_hook->entry)();
+    else full_failure=1;
+#endif
 }
 
 static void nop( void ) { }
@@ -480,6 +499,10 @@ static void my_big_init_task()
     menu_init();
     debug_init();
     call_init_funcs(); // among other things, this initialises modules
+#ifdef CONFIG_7D206_FULL_CORE
+    /* Do not start ML tasks after a refused startup contract. */
+    if (full_failure) return;
+#endif
     msleep(200); // leave some time for property handlers to run
 
 #ifdef CONFIG_XF605
