@@ -6,14 +6,32 @@ The 7D.203 port is the base; this directory only overrides what differs in
 
 ## Building
 
-```
-make -C platform/7D.206
+Install the Arm GNU Toolchain (`arm-none-eabi`), GNU Make, a host C compiler,
+Python 3, and `zip`. On macOS, put GNU Make, GNU coreutils, and GNU sed ahead
+of the system tools in `PATH`.
+
+From the repository root, set `ARM_BINPATH` to the toolchain's `bin` directory:
+
+```sh
+export ARM_BINPATH=/path/to/arm-gnu-toolchain/bin
+make -C platform/7D.206 -j8 READELF="$ARM_BINPATH/arm-none-eabi-readelf"
 ```
 
-This builds `build/magiclantern.zip` (autoexec.bin, `ML/modules/*.mo`,
-`7D_206.sym`). For the 7D, modules are built into `modules/build/7d`;
-`sd_clock` and `yolo` are skipped: the 7D has a CF slot and no Wi-Fi.
+The output is `platform/7D.206/build/magiclantern.zip`. It includes
+`autoexec.bin`, bundled resources, selected `ML/modules/*.mo` files, and
+the `7D_206.sym` symbol table. Modules are built into `modules/build/7d`.
+The build skips `sd_clock` and `yolo` because the 7D has a CF slot and no Wi-Fi.
 `raw_vidx`, `ime_base` and `ime_rot` build, but are not in `modules.included`.
+
+## Installing on a CF card
+
+You can use [MLinstall](https://github.com/petabyt/mlinstall) to prepare the CF card
+in a card reader and, if needed, enable the camera's boot flag over USB. The
+USB step has not been verified on an EOS 7D running firmware 2.0.6.
+
+Extract the contents of `magiclantern.zip` to the root of the prepared card,
+so that `autoexec.bin` and the `ML` folder are at the top level. With the
+camera switched off, insert the card, then turn the camera on.
 
 ## Status
 

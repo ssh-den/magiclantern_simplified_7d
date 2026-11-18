@@ -22,6 +22,9 @@
 Magic Lantern
 =============
 
+For instructions on building from source and preparing a CF card, see the
+[EOS 7D 2.0.6 platform README](platform/7D.206/README.md#building).
+
 Magic Lantern (ML) is a software enhancement that offers increased
 functionality to the excellent Canon DSLR cameras.
   
