@@ -40,7 +40,7 @@ uint32_t ime_base_register(t_ime_handler *handler)
 
 void *ime_base_start (char *caption, char *text, int32_t max_length, int32_t codepage, int32_t charset, t_ime_update_cbr update_cbr, t_ime_done_cbr done_cbr, int32_t x, int32_t y, int32_t w, int32_t h )
 {
-    if(ime_base_method < ime_base_method_count)
+    if(ime_base_method >= 0 && ime_base_method < ime_base_method_count)
     {
         return ime_base_methods[ime_base_method].start(caption, text, max_length, codepage, charset, update_cbr, done_cbr, x, y, w, h);
     }
@@ -51,7 +51,7 @@ void *ime_base_start (char *caption, char *text, int32_t max_length, int32_t cod
 
 static MENU_UPDATE_FUNC(ime_base_method_update)
 {
-    if(ime_base_method < ime_base_method_count)
+    if(ime_base_method >= 0 && ime_base_method < ime_base_method_count)
     {
         MENU_SET_VALUE(ime_base_methods[ime_base_method].name);
     }

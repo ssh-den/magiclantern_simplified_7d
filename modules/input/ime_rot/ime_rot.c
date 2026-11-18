@@ -69,7 +69,6 @@ static unsigned char ime_charset_func[] = { CHAR_DEL, CHAR_OK, CHAR_CANCEL };
 static unsigned int ime_charset_types[] = { IME_CHARSET_ALPHA | IME_CHARSET_FILENAME, IME_CHARSET_ALPHA, IME_CHARSET_NUMERIC | IME_CHARSET_FILENAME, IME_CHARSET_PUNCTUATION, IME_CHARSET_HEX, IME_CHARSET_MATH, IME_CHARSET_MAIL, IME_CHARSET_ANY };
 static unsigned char *ime_charsets[] = { ime_charset_alpha_upper, ime_charset_alpha_lower, ime_charset_numeric, ime_charset_punctuation, ime_charset_hex, ime_charset_math, ime_charset_mail, ime_charset_func };
 static int ime_charcounts[] = { sizeof(ime_charset_alpha_upper), sizeof(ime_charset_alpha_lower), sizeof(ime_charset_numeric), sizeof(ime_charset_punctuation), sizeof(ime_charset_hex), sizeof(ime_charset_math), sizeof(ime_charset_mail), sizeof(ime_charset_func) };
-static unsigned char *ime_charsetnames[] = { (unsigned char *)"upper", (unsigned char *)"lower", (unsigned char *)"num", (unsigned char *)"punct", (unsigned char *)"hex", (unsigned char *)"math", (unsigned char *)"var" };
 
 
 typedef struct
@@ -87,7 +86,7 @@ typedef struct
     
     /* infos about current selected charset */
     uint32_t charset_type;
-    char *charset;
+    const unsigned char *charset;
     uint32_t charset_charcount;
     uint32_t charsetnum;
     uint32_t returncode;
@@ -153,7 +152,7 @@ static void ime_draw_wheel(uint32_t selection, uint32_t charsetnum, uint32_t col
     uint32_t last_char = (uint32_t)(char_pos + visible_chars / 2);
     
     /* display only a window with the nearest characters around selection */
-    if(last_char >= ime_charcounts[charsetnum] - 1)
+    if(last_char >= (uint32_t)ime_charcounts[charsetnum] - 1)
     {
         last_char = ime_charcounts[charsetnum] - 1;
         first_char = MAX(0, last_char - visible_chars + 1);
@@ -421,6 +420,16 @@ static unsigned int ime_keypress_config(unsigned int key)
 }
 
 
+static void ime_delete_character(ime_ctx_t *ctx)
+{
+    size_t length = strlen(ctx->string);
+    if (ctx->caret_pos < length)
+    {
+        char *caret = ctx->string + ctx->caret_pos;
+        memmove(caret, caret + 1, length - ctx->caret_pos);
+    }
+}
+
 static unsigned int ime_keypress_cbr(unsigned int key)
 {
     ime_ctx_t *ctx = ime_current_ctx;
@@ -517,8 +526,7 @@ static unsigned int ime_keypress_cbr(unsigned int key)
             break;
             
         case MODULE_KEY_TRASH:
-            /* directly delete character */
-            strncpy((char*)&ctx->string[ctx->caret_pos], (char*)&ctx->string[ctx->caret_pos+1], ctx->max_length - ctx->caret_pos - 1);
+            ime_delete_character(ctx);
             break;
             
         case MODULE_KEY_JOY_CENTER:
@@ -529,9 +537,7 @@ static unsigned int ime_keypress_cbr(unsigned int key)
                 
                 if(selected_char == CHAR_DEL)
                 {
-                    /* backspace/del was pressed */
-                    //ctx->caret_pos--;
-                    strncpy((char*)&ctx->string[ctx->caret_pos], (char*)&ctx->string[ctx->caret_pos+1], ctx->max_length - ctx->caret_pos - 1);
+                    ime_delete_character(ctx);
                 }
                 else if(selected_char == CHAR_OK)
                 {
@@ -674,7 +680,9 @@ static void ime_input(uint32_t parm)
 
 static void *ime_start(char *caption, char *text, int32_t max_length, int32_t codepage, int32_t charset, t_ime_update_cbr update_cbr, t_ime_done_cbr done_cbr, int32_t x, int32_t y, int32_t w, int32_t h)
 {
+    if (!text || max_length <= 0 || !memchr(text, 0, max_length)) return NULL;
     ime_ctx_t *ctx = malloc(sizeof(ime_ctx_t));
+    if (!ctx) return NULL;
     
     /* set parameters */
     ctx->string = text;
@@ -717,13 +725,13 @@ static void *ime_start(char *caption, char *text, int32_t max_length, int32_t co
     }
     
     /* no valid charset found */
-    if(ctx->charsetnum >= COUNT(ime_charcounts))
+    if (ctx->charsetnum >= COUNT(ime_charcounts) ||
+        task_create("ime_rot", 0x1c, 0x1000, ime_input, ctx) <= 0)
     {
+        free(ctx->caption);
+        free(ctx);
         return NULL;
     }
-    
-    /* start input system - ToDo: add a lock to make sure only one thread starts the IME */
-    task_create("ime_rot", 0x1c, 0x1000, ime_input, ctx);
     
     return ctx;
 }
