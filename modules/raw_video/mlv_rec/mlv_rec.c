@@ -109,6 +109,7 @@ static uint32_t cam_6d = 0;
 static uint32_t cam_600d = 0;
 static uint32_t cam_650d = 0;
 static uint32_t cam_7d = 0;
+static uint32_t cam_7d_206 = 0;
 static uint32_t cam_70d = 0;
 static uint32_t cam_700d = 0;
 static uint32_t cam_60d = 0;
@@ -122,7 +123,7 @@ static uint32_t cam_5d3_123 = 0;
 static uint32_t raw_rec_edmac_align = 0x0400;
 static uint32_t raw_rec_write_align = 0x0200;
 
-static uint32_t mlv_rec_dma_active = 0;
+static volatile uint32_t mlv_rec_dma_active = 0;
 static uint32_t mlv_writer_threads = 2;
 static uint32_t mlv_max_filesize = 0xFFFFFFFF;
 static uint32_t abort_test = 0;
@@ -1810,6 +1811,7 @@ static void hack_liveview(int32_t unhack)
             cam_700d ? 0xFF52BB60 :
             cam_70d ? 0xff558ff0 :
             cam_7d  ? 0xFF345788 :
+            cam_7d_206 ? 0xFF34575C :
             cam_60d ? 0xff36fa3c :
             cam_100d ? 0xFF542580 :
             cam_500d ? 0xFF2ABEF8 :
@@ -2229,12 +2231,15 @@ static void mlv_rec_dma_cbr_w(void *ctx)
     /* call the VIDF CBRs */
     mlv_rec_call_cbr(MLV_REC_EVENT_VIDF, slots[capture_slot].ptr);
 	
-    mlv_rec_dma_active = 0;
-    
     mlv_rec_dma_end = get_us_clock();
     mlv_rec_dma_duration = (uint32_t)(mlv_rec_dma_end - mlv_rec_dma_start);
     
     edmac_copy_rectangle_adv_cleanup();
+    /* The writer must not see this slot until its payload is complete. */
+    slots[capture_slot].status = SLOT_FULL;
+    /* Publish completion only after the old transfer's cleanup. A VSYNC may
+     * then start the next transfer without racing that cleanup. */
+    mlv_rec_dma_active = 0;
 }
 
 static int32_t FAST process_frame()
@@ -2286,16 +2291,15 @@ static int32_t FAST process_frame()
     /* dont process this frame if a module wants to skip that */
     if(raw_rec_cbr_skip_frame(fullSizeBuffer))
     {
+        slots[capture_slot].status = SLOT_FREE;
         return 0;
     }
     
-    mlv_rec_dma_active = 1;
-    edmac_copy_rectangle_cbr_start(ptr, fullSizeBuffer, raw_info.width*raw_info.bits_per_pixel/8, (skip_x+7)/8*raw_info.bits_per_pixel, skip_y/2*2, res_x*raw_info.bits_per_pixel/8, 0, 0, res_x*raw_info.bits_per_pixel/8, res_y, &mlv_rec_dma_cbr_r, &mlv_rec_dma_cbr_w, NULL);
-    mlv_rec_dma_start = get_us_clock();
-
-    /* copy current frame to our buffer and crop it to its final size */
     slots[capture_slot].frame_number = frame_count;
-    slots[capture_slot].status = SLOT_FULL;
+    slots[capture_slot].status = SLOT_LOCKED;
+    mlv_rec_dma_active = 1;
+    mlv_rec_dma_start = get_us_clock();
+    edmac_copy_rectangle_cbr_start(ptr, fullSizeBuffer, raw_info.width*raw_info.bits_per_pixel/8, (skip_x+7)/8*raw_info.bits_per_pixel, skip_y/2*2, res_x*raw_info.bits_per_pixel/8, 0, 0, res_x*raw_info.bits_per_pixel/8, res_y, &mlv_rec_dma_cbr_r, &mlv_rec_dma_cbr_w, NULL);
 
     trace_write(raw_rec_trace_ctx, "==> enqueue frame %d in slot %d DMA: %d us", frame_count, capture_slot, mlv_rec_dma_duration);
 
@@ -3035,6 +3039,13 @@ abort:
 
 static void enqueue_buffer(uint32_t writer, write_job_t *write_job)
 {
+    /* Reserve a descriptor before changing slot ownership. */
+    write_job_t *queue_job = NULL;
+    if (msg_queue_receive(mlv_job_alloc_queue, &queue_job, 0) || !queue_job)
+    {
+        raw_recording_state = RAW_FINISHING;
+        return;
+    }
     /* if we are about to overflow, save a smaller number of frames, so they can be freed quicker */
     if (measured_write_speed)
     {
@@ -3045,7 +3056,9 @@ static void enqueue_buffer(uint32_t writer, write_job_t *write_job)
         int32_t free_slots = get_free_slots();
         int32_t overflow_time = free_slots * 1000 * 10 / fps;
         /* better underestimate write speed a little */
-        int32_t frame_limit = overflow_time * 1024 / 10 * (measured_write_speed * 9 / 100) * 1024 / (write_job->block_size / write_job->block_len) / 10;
+        int64_t frame_limit = (int64_t)overflow_time * 1024 / 10 *
+            ((int64_t)measured_write_speed * 9 / 100) * 1024 /
+            (write_job->block_size / write_job->block_len) / 10;
 
         /* do not decrease write size if skipping is allowed */
         if (!allow_frame_skip && frame_limit >= 0 && frame_limit < (int32_t)write_job->block_len)
@@ -3112,20 +3125,22 @@ static void enqueue_buffer(uint32_t writer, write_job_t *write_job)
     }
 
     /* enqueue the configured block */
-    write_job_t *queue_job = NULL;
-    msg_queue_receive(mlv_job_alloc_queue, &queue_job, 0);
-    
-    if(!queue_job)
-    {
-        trace_write(raw_rec_trace_ctx, "   --> WRITER#%d: queue_job is NULL");
-        return;
-    }
-    
     *queue_job = *write_job;
     queue_job->job_type = JOB_TYPE_WRITE;
     queue_job->writer = writer;
     
-    msg_queue_post(mlv_writer_queues[writer], (uint32_t) queue_job);
+    /* A higher-priority writer may run before post returns. Publish the
+     * count first so its dequeue cannot underflow it. */
+    util_atomic_inc(&writer_job_count[writer]);
+    if (msg_queue_post(mlv_writer_queues[writer], (uint32_t) queue_job))
+    {
+        util_atomic_dec(&writer_job_count[writer]);
+        for (uint32_t slot = write_job->block_start;
+             slot < write_job->block_start + write_job->block_len; slot++)
+            slots[slot].status = SLOT_FULL;
+        msg_queue_post(mlv_job_alloc_queue, (uint32_t) queue_job);
+        raw_recording_state = RAW_FINISHING;
+    }
     //trace_write(raw_rec_trace_ctx, "<-- POST: group with %d entries at %d (%dKiB) for slow card", write_job->block_len, write_job->block_start, write_job->block_size/1024);
 }
 
@@ -3181,6 +3196,7 @@ static void mlv_rec_precreate_files(char *base_filename, uint32_t count, mlv_fil
         
         mlv_rec_get_chunk_filename(base_filename, filename, pos, 0);
         handle = FIO_CreateFile(filename);
+        if (!handle) return; /* precreation is optional; never close NULL */
         raw_prepare_chunk(handle, &hdr);
         FIO_CloseFile(handle);
         trace_write(raw_rec_trace_ctx, "mlv_rec_precreate_files: '%s' created", filename);
@@ -3190,6 +3206,7 @@ static void mlv_rec_precreate_files(char *base_filename, uint32_t count, mlv_fil
         {
             mlv_rec_get_chunk_filename(base_filename, filename, pos, 1);
             handle = FIO_CreateFile(filename);
+            if (!handle) return;
             raw_prepare_chunk(handle, &hdr);
             FIO_CloseFile(handle);
             trace_write(raw_rec_trace_ctx, "mlv_rec_precreate_files: '%s' created", filename);
@@ -3294,6 +3311,37 @@ static void restore_bit_depth()
     raw_lv_request_bpp(14);
 }
 
+static int recorder_wait_timeout(int timeout)
+{
+    /* A queued write is not guaranteed to finish before capture fills the
+     * remaining slots. Wake to feed an idle writer within half that budget. */
+    int fps = fps_get_current_x1000();
+    if (fps <= 0) return timeout;
+    int budget = (int)((int64_t)get_free_slots() * 500000 / fps);
+    return MIN(timeout, MAX(1, budget));
+}
+
+static int stop_writer_tasks(void)
+{
+    /* There is no task on the unused second card in single-card mode. */
+    for (unsigned writer = 0; writer < mlv_writer_threads; writer++)
+    {
+        write_job_t *job = NULL;
+        if (msg_queue_receive(mlv_job_alloc_queue, &job, 0) || !job) return 0;
+        job->job_type = JOB_TYPE_WRITE;
+        job->block_len = 0;
+        util_atomic_inc(&writer_job_count[writer]);
+        if (msg_queue_post(mlv_writer_queues[writer], (uint32_t)job))
+        {
+            util_atomic_dec(&writer_job_count[writer]);
+            msg_queue_post(mlv_job_alloc_queue, (uint32_t)job);
+            return 0;
+        }
+    }
+    for (int t = 0; mlv_rec_threads && t < 5000; t += 20) msleep(20);
+    return !mlv_rec_threads;
+}
+
 static void raw_video_rec_task()
 {
     /* init stuff */
@@ -3353,8 +3401,6 @@ static void raw_video_rec_task()
         edmac_memcpy_res_lock();
         clrscr();
 
-        write_job_t *write_job = NULL;
-
         frame_count = 0;
         frame_skips = 0;
         mlv_file_count = 0;
@@ -3387,6 +3433,8 @@ static void raw_video_rec_task()
         mlv_rec_precreate_files(mlv_movie_filename, MAX_PRECREATE_FILES, mlv_file_hdr);
         
         /* open files for writers */
+        for (unsigned writer = 0; writer < mlv_writer_threads; writer++)
+            mlv_handles[writer] = NULL;
         for(uint32_t writer = 0; writer < mlv_writer_threads; writer++)
         {
             written[writer] = 0;
@@ -3406,7 +3454,12 @@ static void raw_video_rec_task()
                 trace_write(raw_rec_trace_ctx, "FIO_CreateFile(#%d): FAILED", writer);
                 NotifyBox(5000, "Failed to create file. Card full?");
                 beep_times(2);
-                return;
+                /* No writer task owns the handles yet. */
+                for (unsigned i = 0; i < mlv_writer_threads; i++)
+                    if (mlv_handles[i]) { FIO_CloseFile(mlv_handles[i]); mlv_handles[i] = NULL; }
+                edmac_memcpy_res_unlock();
+                set_recording_custom(CUSTOM_RECORDING_NOT_RECORDING);
+                goto cleanup;
             }
             
             mlv_file_hdr.fileCount++;
@@ -3430,6 +3483,9 @@ static void raw_video_rec_task()
                 NotifyBox(5000, "Threads failed to start");
                 trace_write(raw_rec_trace_ctx, "Threads failed to start");
                 beep_times(2);
+                /* A created task may still start late; retain its buffers and
+                 * engine ownership rather than reporting idle/freeing them. */
+                raw_recording_state = RAW_FINISHING;
                 return;
             }
             msleep(100);
@@ -3447,6 +3503,11 @@ static void raw_video_rec_task()
             /* on shutdown or writers that aborted, abort even if there are unwritten slots */
             if(ml_shutdown_requested || !mlv_rec_threads)
             {
+                if (mlv_rec_threads || mlv_rec_dma_active)
+                {
+                    raw_recording_state = RAW_FINISHING;
+                    return; /* buffers/resources still have an asynchronous owner */
+                }
                 /* exclusive edmac access no longer needed */
                 edmac_memcpy_res_unlock();
                 set_recording_custom(CUSTOM_RECORDING_NOT_RECORDING);
@@ -3463,9 +3524,18 @@ static void raw_video_rec_task()
                 timeout = 30;
             }
 
+            timeout = recorder_wait_timeout(timeout);
             if(msg_queue_receive(mlv_mgr_queue, &returned_job, timeout))
             {
                 returned_job = NULL;
+            }
+
+            /* Return completed slots before finding the next write batch. */
+            if (returned_job && returned_job->job_type == JOB_TYPE_WRITE)
+            {
+                for (uint32_t slot = returned_job->block_start;
+                     slot < returned_job->block_start + returned_job->block_len; slot++)
+                    slots[slot].status = SLOT_FREE;
             }
 
             /* when capture task had to skip a frame, stop recording */
@@ -3500,7 +3570,6 @@ static void raw_video_rec_task()
                 if(find_largest_buffer(0, &write_job, 16 * 1024 * 1024))
                 {
                     enqueue_buffer(0, &write_job);
-                    util_atomic_inc(&writer_job_count[0]);
                     //task_resume(writer_task_id[0]);
                 }
                 else
@@ -3520,7 +3589,6 @@ static void raw_video_rec_task()
                 if(find_largest_buffer(fast_card_buffers, &write_job, 4 * 1024 * 1024))
                 {
                     enqueue_buffer(1, &write_job);
-                    util_atomic_inc(&writer_job_count[1]);
                     //task_resume(writer_task_id[1]);
                 }
                 else
@@ -3535,15 +3603,8 @@ static void raw_video_rec_task()
                 if(returned_job->job_type == JOB_TYPE_WRITE)
                 {
                     //trace_write(raw_rec_trace_ctx, "<-- processing returned_job 0x%08X from %d", returned_job, returned_job->writer);
-                    /* set all slots as free again */
-                    for(uint32_t slot = returned_job->block_start; slot < (returned_job->block_start + returned_job->block_len); slot++)
-                    {
-                        slots[slot].status = SLOT_FREE;
-                        //trace_write(raw_rec_trace_ctx, "<-- WRITER#%d: free slot %d", returned_job->writer, slot);
-                    }
-
                     /* calc writing and idle time */
-                    int32_t write_time = (uint32_t)(returned_job->time_after - returned_job->time_before);
+                    int32_t write_time = MAX(1, (uint32_t)(returned_job->time_after - returned_job->time_before));
                     int32_t mgmt_time = 0;
 
                     /* wait until first block is written before counting */
@@ -3678,6 +3739,11 @@ static void raw_video_rec_task()
             /* on shutdown exit immediately */
             if(ml_shutdown_requested || !mlv_rec_threads)
             {
+                if (mlv_rec_threads || mlv_rec_dma_active)
+                {
+                    raw_recording_state = RAW_FINISHING;
+                    return;
+                }
                 /* exclusive edmac access no longer needed */
                 edmac_memcpy_res_unlock();
                 set_recording_custom(CUSTOM_RECORDING_NOT_RECORDING);
@@ -3709,16 +3775,10 @@ static void raw_video_rec_task()
         /* done, this will stop the vsync CBR and the copying task */
         raw_recording_state = RAW_FINISHING;
 
-        /* queue two aborts to cancel tasks */
-        msg_queue_receive(mlv_job_alloc_queue, &write_job, 0);
-        write_job->job_type = JOB_TYPE_WRITE;
-        write_job->block_len = 0;
-        msg_queue_post(mlv_writer_queues[0], (uint32_t) write_job);
-
-        msg_queue_receive(mlv_job_alloc_queue, &write_job, 0);
-        write_job->job_type = JOB_TYPE_WRITE;
-        write_job->block_len = 0;
-        msg_queue_post(mlv_writer_queues[1], (uint32_t) write_job);
+        if (!stop_writer_tasks())
+        {
+            return; /* fail closed: a live writer may still own the buffers */
+        }
 
         /* flush queues */
         msleep(250);
@@ -4266,11 +4326,12 @@ static uint32_t raw_rec_should_preview(uint32_t ctx)
     if (!is_movie_mode()) return 0;
 
     /* keep x10 mode unaltered, for focusing */
-    if (lv_dispsize == 10 && !cam_7d) return 0;
+    if (lv_dispsize == 10 && !cam_7d && !cam_7d_206) return 0;
 
     if (PREVIEW_AUTO)
-        /* enable preview in x5 mode, since framing doesn't match */
-        return lv_dispsize == 5;
+        /* enable preview in x5 mode, since framing doesn't match;
+         * 7D.206 loses x5 capture with ML preview, so keep Canon's there */
+        return !cam_7d_206 && lv_dispsize == 5;
 
     else if (PREVIEW_CANON)
         return 0;
@@ -4353,6 +4414,7 @@ static unsigned int raw_rec_init()
     cam_600d  = is_camera("600D", "1.0.2");
     cam_650d  = is_camera("650D", "1.0.4");
     cam_7d    = is_camera("7D",   "2.0.3");
+    cam_7d_206 = is_camera("7D", "2.0.6");
     cam_70d   = is_camera("70D",  "1.1.2");
     cam_700d  = is_camera("700D", "1.1.5");
     cam_60d   = is_camera("60D",  "1.1.1");
@@ -4366,7 +4428,7 @@ static unsigned int raw_rec_init()
     
     /* not all models support exFAT filesystem */
     uint32_t exFAT = 1;
-    if(cam_5d2 || cam_50d || cam_500d || cam_7d)
+    if(cam_5d2 || cam_50d || cam_500d || cam_7d || cam_7d_206)
     {
         exFAT = 0;
         large_file_support = 0;
