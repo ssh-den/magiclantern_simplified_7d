@@ -629,7 +629,7 @@
 #define PROP_MECHA_COUNTER    0x12000001
 #define PROP_RELEASE_COUNTER  0x12000003
 
-#define PROP_AFPOINT 0x8000000A // len=70x8003004F
+#define PROP_AFPOINT 0x8000000A // 7D: len=7; preserve the exact buffer length when writing
 
 #define PROP_BEEP 0x80000023
 
@@ -759,7 +759,16 @@ void REQUIRES(PropMgrTask) _prop_handler_##id( \
 #define PROP_INT(id,name) \
 volatile uint32_t name; \
 PROP_HANDLER(id) { \
+        if (!buf || len < sizeof(*buf)) return; \
         name = buf[0]; \
+}
+
+/* Some DryOS properties are halfwords, despite the common callback type. */
+#define PROP_INT16(id,name) \
+volatile uint32_t name; \
+PROP_HANDLER(id) { \
+        if (!buf || len < sizeof(uint16_t)) return; \
+        name = *(const uint16_t *)buf; \
 }
 
 #endif

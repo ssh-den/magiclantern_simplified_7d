@@ -29,7 +29,7 @@ static void afma_wait_ack()
 
 PROP_HANDLER(PROP_AFMA)
 {
-    ASSERT(len == sizeof(afma_buf));
+    if (!buf || len != sizeof(afma_buf)) return;
     memcpy(afma_buf, buf, sizeof(afma_buf));
     afma_ack = 1;
 }

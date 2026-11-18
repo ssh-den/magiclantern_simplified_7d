@@ -6697,7 +6697,13 @@ static void menu_reload_flags(char* filename)
     free(buf);
 }
 
-#define CFG_APPEND(fmt, ...) do { cfglen += snprintf(cfg + cfglen, CFG_SIZE - cfglen, fmt, ## __VA_ARGS__); } while(0)
+#define CFG_APPEND(fmt, ...) do { \
+    if (cfglen >= 0) { \
+        int left = CFG_SIZE - cfglen; \
+        int added = snprintf(cfg + cfglen, left, fmt, ## __VA_ARGS__); \
+        cfglen = (added < 0 || added >= left) ? -2 : cfglen + added; \
+    } \
+} while(0)
 #define CFG_SIZE (256*1024)
 
 static int menu_save_unloaded_flags(char* filename, char * cfg, int cfglen)
@@ -6731,15 +6737,17 @@ static int menu_save_unloaded_flags(char* filename, char * cfg, int cfglen)
     return cfglen;
 }
 
-static void menu_save_flags(char* filename)
+static int menu_save_flags(char* filename)
 {
     menu_normalize_usage_counters();
 
     char* cfg = malloc(CFG_SIZE);
+    if (!cfg) return -1;
     cfg[0] = '\0';
     int cfglen = 0;
 
     cfglen = menu_save_unloaded_flags(filename, cfg, cfglen);
+    if (cfglen < 0) { free(cfg); return -2; }
 
     for (struct menu * menu = menus; menu; menu = menu->next)
     {
@@ -6767,16 +6775,20 @@ static void menu_save_flags(char* filename)
         }
     }
     
+    if (cfglen < 0) { free(cfg); return -2; }
     FILE * file = FIO_CreateFile(filename);
+    int result = -1;
     if (!file)
         goto end;
     
-    FIO_WriteFile(file, cfg, strlen(cfg));
+    int length = strlen(cfg);
+    result = FIO_WriteFile(file, cfg, length) == length ? 0 : -2;
 
     FIO_CloseFile( file );
 
 end:
     free(cfg);
+    return result;
 }
 
 static void config_menu_reload_flags()

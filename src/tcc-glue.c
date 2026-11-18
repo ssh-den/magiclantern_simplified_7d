@@ -36,6 +36,7 @@ int _tcc_open(const char *pathname, int flags)
         printf("Error loading '%s': File does not exist\n", pathname);
         return -1;
     }
+    if (size > 0x7FFFFFFF - sizeof(filehandle_t)) return -1;
     handle = fio_malloc(sizeof(filehandle_t) + size);
     if(!handle)
     {
@@ -53,8 +54,12 @@ int _tcc_open(const char *pathname, int flags)
         fio_free(handle);
         return -1;
     }
-    FIO_ReadFile(file, &handle->data, size);
+    int count=FIO_ReadFile(file, &handle->data, size);
     FIO_CloseFile(file);
+    if (count != (int)size) {
+        fio_free(handle);
+        return -1;
+    }
     
     return (int)handle;
 }
@@ -62,7 +67,8 @@ int _tcc_open(const char *pathname, int flags)
 int _tcc_read(int fd, void *buf, int size)
 {
     filehandle_t *handle = (filehandle_t *)fd;
-    int count = (size + handle->pos < handle->size)? (size) : MAX(handle->size - handle->pos, 0);
+    if (!buf || size < 0 || handle->pos < 0 || handle->pos > handle->size) return -1;
+    int count = MIN(size, handle->size - handle->pos);
     
     memcpy(buf, ((void*)&handle->data) + handle->pos, count);
     handle->pos += count;
@@ -79,20 +85,23 @@ int _tcc_close(int fd)
 int _tcc_lseek(int fd, int offset, int whence)
 {
     filehandle_t *handle = (filehandle_t *)fd;
-    
+    int64_t pos;
     switch(whence)
     {
         case 0:
-            handle->pos = offset;
+            pos = offset;
             break;
         case 1:
-            handle->pos += offset;
+            pos = (int64_t)handle->pos + offset;
             break;
         case 2:
-            handle->pos = handle->size - offset;
+            pos = (int64_t)handle->size + offset;
             break;
+        default:
+            return -1;
     }
-    
+    if (pos < 0 || pos > handle->size) return -1;
+    handle->pos=pos;
     return handle->pos;
 }
 

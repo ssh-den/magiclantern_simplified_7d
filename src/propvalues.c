@@ -53,16 +53,21 @@ int get_digic_version(void)
 
 PROP_HANDLER(PROP_CAM_MODEL)
 {
+    if (!buf || len < 36) return;
     memcpy((char *)&camera_model_id, (void*)buf + 32, 4);
-    snprintf(camera_model, sizeof(camera_model), (const char *)buf);
+    memcpy(camera_model, buf, sizeof(camera_model) - 1);
+    camera_model[sizeof(camera_model) - 1] = '\0';
 }
 
 PROP_HANDLER(PROP_BODY_ID)
 {
+    if (!buf) return;
     /* different camera serial lengths */
     if(len == 8)
     {
-        snprintf(camera_serial, sizeof(camera_serial), "%X%08X", (uint32_t)(*((uint64_t*)buf) & 0xFFFFFFFF), (uint32_t) (*((uint64_t*)buf) >> 32));
+        uint64_t serial;
+        memcpy(&serial, buf, sizeof(serial));
+        snprintf(camera_serial, sizeof(camera_serial), "%X%08X", (uint32_t)serial, (uint32_t)(serial >> 32));
     }
     else if(len == 4)
     {
@@ -76,7 +81,10 @@ PROP_HANDLER(PROP_BODY_ID)
 
 PROP_HANDLER(PROP_FIRMWARE_VER)
 {
-    snprintf(firmware_version, sizeof(firmware_version), (const char *)buf);
+    if (!buf) return;
+    if (len >= sizeof(firmware_version)) len = sizeof(firmware_version) - 1;
+    memcpy(firmware_version, buf, len);
+    firmware_version[len] = '\0';
 }
 
 volatile PROP_INT(PROP_LV_DISPSIZE, lv_dispsize);
@@ -94,6 +102,8 @@ volatile PROP_INT(PROP_AVAIL_SHOT, avail_shot);
     // old kitor comment says there's a race, possibly to do with
     // lvaf_mode name?  Confirm this is sane on e.g. R and 850D
     volatile PROP_INT(PROP_LVAF_MODE, af_mode);
+#elif defined(CONFIG_7D)
+    volatile PROP_INT16(PROP_AF_MODE, af_mode);
 #else
     volatile PROP_INT(PROP_AF_MODE, af_mode);
 #endif
@@ -131,6 +141,7 @@ volatile PROP_INT(PROP_SHOOTING_MODE, shooting_mode_custom);
 // unique value.
 PROP_HANDLER(PROP_SHOOTING_MODE_2)
 {
+    if (!buf || len < sizeof(*buf)) return;
     shooting_mode = buf[0];
 
     #ifdef CONFIG_NO_DEDICATED_MOVIE_MODE
@@ -141,7 +152,8 @@ PROP_HANDLER(PROP_SHOOTING_MODE_2)
 volatile int dofpreview;
 PROP_HANDLER(PROP_DOF_PREVIEW_MAYBE) // len=2
 {
-    dofpreview = buf[0] & 0xFFFF;
+    if (!buf || len < sizeof(uint16_t)) return;
+    dofpreview = *(const uint16_t *)buf;
 }
 
 volatile int lv = 0;
@@ -176,6 +188,7 @@ volatile int total_mirror_count = 0;
 // See descriptions in property.h to learn more.
 PROP_HANDLER(PROP_MECHA_COUNTER)
 {
+    if (!buf || len < 2 * sizeof(*buf)) return;
     shutter_count = buf[0];      // TotalShutter
     total_mirror_count = buf[1]; // TotalMirror
 
@@ -195,11 +208,13 @@ PROP_HANDLER(PROP_MECHA_COUNTER)
 // New info on D8, total counter including silent shoots.
 PROP_HANDLER(PROP_RELEASE_COUNTER)
 {
+    if (!buf || len < sizeof(*buf)) return;
     total_shots_count = buf[0]; // TotalShoot
 }
 #else
 PROP_HANDLER(PROP_SHUTTER_COUNTER)
 {
+    if (!buf || len < 2 * sizeof(*buf)) return;
     shutter_count = buf[0];
     shutter_count_plus_lv_actuations = buf[1];
 }
@@ -209,6 +224,7 @@ volatile int display_sensor = 0;
 
 PROP_HANDLER(PROP_DISPSENSOR_CTRL)
 {
+    if (!buf || len < sizeof(*buf)) return;
     display_sensor = !buf[0];
 }
 
@@ -218,9 +234,11 @@ volatile int video_mode_resolution = 0; // 0 if full hd, 1 if 720p, 2 if 480p
 PROP_HANDLER(PROP_VIDEO_MODE)
 {
     #ifdef CONFIG_500D
+    if (!buf || len < 2 * sizeof(*buf)) return;
     video_mode_resolution = buf[0];
     video_mode_fps = buf[1];
     #elif defined(CONFIG_DIGIC_678X)
+    if (!buf || len < 3 * sizeof(*buf)) return;
     video_mode_crop = buf[0];
     video_mode_resolution = buf[1];
     // New cams report more precision for fps, as fps * 100.
@@ -228,6 +246,7 @@ PROP_HANDLER(PROP_VIDEO_MODE)
     // Add 50 to round up, so e.g. 29.97 gets reported as 30.
     video_mode_fps = (buf[2] + 50) / 100;
     #else
+    if (!buf || len < 3 * sizeof(*buf)) return;
     video_mode_crop = buf[0];
     video_mode_resolution = buf[1];
     video_mode_fps = buf[2];
@@ -237,11 +256,13 @@ PROP_HANDLER(PROP_VIDEO_MODE)
 #ifdef CONFIG_LIVEVIEW
 PROP_HANDLER( PROP_LV_ACTION )
 {
+    if (!buf || len < sizeof(*buf)) return;
     lv = !buf[0];
 }
 #endif
 
 /* special case for dual monitor support */
+
 /* external display with mirroring enabled, from ML's standpoint, is identical to built-in LCD */
 /* therefore, if hdmi_mirroring is true, the rest of ML code will believe there's no external monitor connected */
 
@@ -271,12 +292,14 @@ static void hdmi_vars_update()
 
 PROP_HANDLER(PROP_HDMI_CHANGE)
 {
+    if (!buf || len < sizeof(*buf)) return;
     ext_monitor_hdmi_raw = buf[0];
     hdmi_vars_update();
 }
 
 PROP_HANDLER(PROP_HDMI_CHANGE_CODE)
 {
+    if (!buf || len < sizeof(*buf)) return;
     hdmi_code_raw = buf[0];
     hdmi_vars_update();
 }
@@ -286,18 +309,24 @@ int __recording = 0;
 int shooting_type = 0;
 PROP_HANDLER(PROP_SHOOTING_TYPE)
 {
+    if (!buf || len < sizeof(*buf)) return;
     shooting_type = buf[0];
     __recording = (shooting_type == 4 ? 2 : 0);
 }
 
 PROP_HANDLER(PROP_MOVIE_SIZE_50D)
 {
+    if (!buf || len < sizeof(*buf)) return;
     video_mode_resolution = buf[0];
     video_mode_fps = 30;
 }
 #else
 volatile PROP_INT(PROP_MVR_REC_START, __recording);
+#ifdef CONFIG_7D
+volatile PROP_INT16(PROP_SHOOTING_TYPE, shooting_type);
+#else
 volatile PROP_INT(PROP_SHOOTING_TYPE, shooting_type);
+#endif
 #endif
 int __recording_custom = 0;
 
@@ -315,6 +344,11 @@ int lv_disp_mode;
  */
 PROP_HANDLER(PROP_LV_OUTPUT_TYPE)
 {
+    #if defined(CONFIG_5D3) || defined(EVF_STATE) || defined(CONFIG_50D)
+    if (!buf || len < 2 * sizeof(*buf)) return;
+    #else
+    if (!buf || len < sizeof(*buf)) return;
+    #endif
     #if defined(CONFIG_5D3)
     /* 1 when Canon overlays are present on the built-in LCD, 0 when they are not present (so we can display our overlays) */
     /* 2 on external monitor with mirroring enabled; however, you can't tell when Canon overlays are present (FIXME) */
@@ -332,6 +366,8 @@ PROP_HANDLER(PROP_LV_OUTPUT_TYPE)
 
 #if defined(CONFIG_NO_AUTO_ISO_LIMITS)
 int auto_iso_range = 0x4868; // no auto ISO in Canon menus; considering it fixed 100-1600.
+#elif defined(CONFIG_7D)
+volatile PROP_INT16(PROP_AUTO_ISO_RANGE, auto_iso_range);
 #else
 volatile PROP_INT(PROP_AUTO_ISO_RANGE, auto_iso_range);
 #endif
@@ -339,15 +375,19 @@ volatile PROP_INT(PROP_AUTO_ISO_RANGE, auto_iso_range);
 char artist_name[64]="                                                               ";
 PROP_HANDLER( PROP_ARTIST_STRING )
 {
-    if( len > sizeof(artist_name) ) len = sizeof(artist_name);
+    if (!buf) return;
+    if( len >= sizeof(artist_name) ) len = sizeof(artist_name) - 1;
     memcpy( artist_name, buf, len );
+    artist_name[len] = '\0';
 }
 
 char copyright_info[64]="                                                               ";
 PROP_HANDLER( PROP_COPYRIGHT_STRING )
 {
-    if( len > sizeof(copyright_info) ) len = sizeof(copyright_info);
+    if (!buf) return;
+    if( len >= sizeof(copyright_info) ) len = sizeof(copyright_info) - 1;
     memcpy( copyright_info, buf, len );
+    copyright_info[len] = '\0';
 }
 
 char* get_video_mode_name(int include_fps)

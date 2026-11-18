@@ -69,7 +69,7 @@ static struct config *config_parse_line(const char *line)
     )
         cfg->name[ name_len++ ] = line[i++];
 
-    if( name_len == MAX_NAME_LEN )
+    if( !name_len || name_len == MAX_NAME_LEN )
         goto parse_error;
 
     // And nul terminate it
@@ -84,12 +84,14 @@ static struct config *config_parse_line(const char *line)
         i++;
 
     // Copy the value to the value buffer
-    while( line[i] && value_len < MAX_VALUE_LEN )
+    while( line[i] && value_len + 1 < MAX_VALUE_LEN )
         cfg->value[ value_len++ ] = line[ i++ ];
+    if (line[i]) goto parse_error;
 
     // Back up to trim any white space
     while( value_len > 0 && isspace( cfg->value[ value_len-1 ] ) )
         value_len--;
+    if (!value_len) goto parse_error;
 
     // And nul terminate it
     cfg->value[ value_len ] = '\0';
@@ -123,7 +125,6 @@ parse_error:
 
     msleep(2000);
     //~ FreeMemory( cfg );
-    call("dumpf");
 //~ malloc_error:
     return 0;
 }
@@ -137,26 +138,17 @@ static int get_char_from_config_file(char* out)
 
 static int read_line(char *buf, size_t size)
 {
-    size_t          len = 0;
-
-    while( len < size )
-    {
-        int rc = get_char_from_config_file(buf+len);
-        if( rc <= 0 )
-            return -1;
-
-        if( buf[len] == '\r' )
-            continue;
-        if( buf[len] == '\n' )
-        {
-            buf[len] = '\0';
-            return len;
-        }
-
-        len++;
+    size_t len = 0;
+    char c;
+    if (!size) return -2;
+    while (get_char_from_config_file(&c) > 0) {
+        if (c == '\r') continue;
+        if (c == '\n') { buf[len] = 0; return len; }
+        if (len + 1 >= size) { buf[len] = 0; return -2; }
+        buf[len++] = c;
     }
-
-    return -1;
+    buf[len] = 0;
+    return len ? (int)len : -1;
 }
 
 
@@ -190,6 +182,7 @@ int config_save_file(const char *filename)
     
     #define MAX_SIZE 10240
     char* msg = malloc(MAX_SIZE);
+    if (!msg) return -1;
     msg[0] = '\0';
   
     snprintf( msg, MAX_SIZE,
@@ -219,11 +212,13 @@ int config_save_file(const char *filename)
         if (*(int*)var->value == var->default_value)
             continue;
 
-        snprintf(msg + strlen(msg), MAX_SIZE - strlen(msg) - 1,
+        int available = MAX_SIZE - strlen(msg);
+        int added = snprintf(msg + strlen(msg), available,
             "%s = %d\r\n",
             var->name,
             *(int*) var->value
         );
+        if (added < 0 || added >= available) { free(msg); return -3; }
 
         count++;
     }
@@ -235,24 +230,25 @@ int config_save_file(const char *filename)
         return -1;
     }
     
-    FIO_WriteFile(file, msg, strlen(msg));
+    int length = strlen(msg);
+    int written = FIO_WriteFile(file, msg, length);
 
     FIO_CloseFile( file );
     
     free(msg);
     
-    return count;
+    return written == length ? count : -2;
 }
 
 
-static struct config *config_parse()
+static int config_parse()
 {
     char line_buf[1000];
-    struct config * cfg = 0;
     int count = 0;
-
-    while( read_line(line_buf, sizeof(line_buf) ) >= 0 )
+    int rc;
+    while ((rc = read_line(line_buf, sizeof(line_buf))) != -1)
     {
+        if (rc < 0) goto error;
         //~ bmp_printf(FONT_SMALL, 0, 0, "cfg line: %s      ", line_buf);
         
         // Ignore any line that begins with # or is empty
@@ -264,18 +260,17 @@ static struct config *config_parse()
         if( !new_config )
             goto error;
 
-        cfg = new_config;
         count++;
 
-        config_auto_parse( cfg );
+        config_auto_parse(new_config);
     }
 
     DebugMsg( DM_MAGIC, 3, "%s: Read %d config values", __func__, count );
-    return cfg;
+    return count;
 
 error:
     DebugMsg( DM_MAGIC, 3, "%s: ERROR", __func__ );
-    return NULL;
+    return -1;
 }
 
 int config_autosave = 1;
@@ -283,7 +278,13 @@ int config_autosave = 1;
 int config_flag_file_setting_load(const char * file)
 {
     uint32_t size;
-    return ( FIO_GetFileSize( file, &size ) == 0 );
+    if (FIO_GetFileSize(file, &size) == 0) return 1;
+    /* A flag only requires existence. Do not discard a readable flag when
+     * Canon's metadata lookup fails; never create the file while probing. */
+    FILE *f = FIO_OpenFile(file, O_RDONLY);
+    if (!f) return 0;
+    FIO_CloseFile(f);
+    return 1;
 }
 
 void config_flag_file_setting_save(const char * file, int setting)
@@ -312,12 +313,14 @@ int config_parse_file(const char *filename)
     snprintf(autosave_flag_file, sizeof(autosave_flag_file), "%sAUTOSAVE.NEG", get_config_dir());
     config_autosave = !config_flag_file_setting_load(autosave_flag_file);
 
+    config_file_size = 0;
     config_file_buf = (void*)read_entire_file(filename, &config_file_size);
     config_file_pos = 0;
-    config_parse();
+    if (!config_file_buf) return 0;
+    int result = config_parse();
     free(config_file_buf);
     config_file_buf = 0;
-    return 1;
+    return result;
 }
 
 static struct config_var* config_var_lookup(int* ptr)
@@ -477,12 +480,14 @@ unsigned int module_config_save(char *filename, module_entry_t *module)
         return -1;
 
     char* msg = malloc(MAX_SIZE);
+    if (!msg) return -1;
     msg[0] = '\0';
 
-    snprintf( msg, MAX_SIZE,
+    int used = snprintf( msg, MAX_SIZE,
         "# Config file for module %s (%s)\n\n",
         module->name, module->filename
     );
+    if (used < 0 || used >= MAX_SIZE) { free(msg); return -1; }
     
     int count = 0;
     for (module_config_t * mconfig = module->config; mconfig && mconfig->name; mconfig++)
@@ -490,11 +495,13 @@ unsigned int module_config_save(char *filename, module_entry_t *module)
         if (*(int*)mconfig->ref->value == mconfig->ref->default_value)
             continue;
 
-        snprintf(msg + strlen(msg), MAX_SIZE - strlen(msg) - 1,
+        int n = snprintf(msg + used, MAX_SIZE - used,
             "%s = %d\r\n",
             mconfig->ref->name,
             *(int*) mconfig->ref->value
         );
+        if (n < 0 || n >= MAX_SIZE - used) { free(msg); return -1; }
+        used += n;
         
         count++;
     }
@@ -513,9 +520,10 @@ unsigned int module_config_save(char *filename, module_entry_t *module)
         return -1;
     }
     
-    FIO_WriteFile(file, msg, strlen(msg));
+    int written = FIO_WriteFile(file, msg, used);
 
     FIO_CloseFile( file );
+    if (written != used) { free(msg); return -1; }
 finish:
     free(msg);
     return 0;
@@ -623,6 +631,7 @@ static struct menu_entry cfg_menus[];
 
 static void config_preset_scan()
 {
+    static char preset_names[13][12];
     char* path = "ML/SETTINGS/";
     struct fio_file file;
     struct fio_dirent * dirent = FIO_FindFirstEx( path, &file );
@@ -636,14 +645,15 @@ static void config_preset_scan()
                     continue;
                 
                 /* special names for keys pressed at startup */
-                if (streq(file.name + strlen(file.name)-4, ".KEY"))
+                if (strlen(file.name)>=4 && streq(file.name + strlen(file.name)-4, ".KEY"))
                     continue;
 
                 /* special names for mode-based config presets */
-                if (streq(file.name + strlen(file.name)-4, ".MOD"))
+                if (strlen(file.name)>=4 && streq(file.name + strlen(file.name)-4, ".MOD"))
                     continue;
                 
                 /* we have reserved statically 12 chars for each preset */
+                config_preset_choices[config_preset_num]=preset_names[config_preset_num-3];
                 snprintf(
                     config_preset_choices[config_preset_num], 12,
                     "%s", file.name
@@ -789,7 +799,7 @@ static char* config_choose_startup_preset()
         }
         else
         {
-            snprintf(config_selected_by_name, sizeof(config_selected_by_name), preset_name);
+            snprintf(config_selected_by_name, sizeof(config_selected_by_name), "%s", preset_name);
             char preset_dir[0x80];
             snprintf(preset_dir, sizeof(preset_dir), "ML/SETTINGS/%s", preset_name);
             if (!is_dir(preset_dir)) { FIO_CreateDirectory(preset_dir); }

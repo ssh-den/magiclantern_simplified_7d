@@ -108,6 +108,11 @@ void prop_add_handler (uint32_t property, void *handler)
 #if defined(POSITION_INDEPENDENT)
     handler[entry].handler = PIC_RESOLVE(handler[entry].handler);
 #endif
+    if (actual_num_handlers >= (int)COUNT(property_handlers) ||
+        actual_num_properties >= (int)COUNT(property_list)) {
+        bmp_printf(FONT_CANON, 0, 0, "Too many prop handlers");
+        return;
+    }
     property_handlers[actual_num_handlers].handler = handler;
     property_handlers[actual_num_handlers].property = property;
     actual_num_handlers++;
@@ -126,10 +131,6 @@ void prop_add_handler (uint32_t property, void *handler)
     {
         property_list[actual_num_properties] = property;
         actual_num_properties++;
-    }
-    if (actual_num_properties >= COUNT(property_list))
-    {
-        bmp_printf(FONT_CANON, 0, 0, "Too many prop handlers");
     }
 }
 
@@ -385,7 +386,7 @@ void prop_request_change(unsigned property, const void* addr, size_t len)
     if (correct_len != (int)len)
     {
         char msg[100];
-        snprintf(msg, sizeof(msg), "PROP_LEN(%x) correct:%x called:%x", property, correct_len, len);
+        snprintf(msg, sizeof(msg), "PROP_LEN(%x) correct:%x called:%lx", property, (unsigned)correct_len, (unsigned long)len);
         bmp_printf(FONT(FONT_MED, COLOR_WHITE, COLOR_RED), 0, 100, msg);
         ml_assert_handler(msg, __FILE__, __LINE__, __func__);
         info_led_blink(10,50,50);

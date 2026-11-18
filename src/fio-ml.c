@@ -319,7 +319,10 @@ PROP_HANDLER(PROP_FOLDER_NUMBER_C)
 
 PROP_HANDLER(PROP_DCIM_DIR_SUFFIX)
 {
-    snprintf(dcim_dir_suffix, sizeof(dcim_dir_suffix), (const char *)buf);
+    if (!buf) return;
+    if (len >= sizeof(dcim_dir_suffix)) len = sizeof(dcim_dir_suffix) - 1;
+    memcpy(dcim_dir_suffix, buf, len);
+    dcim_dir_suffix[len] = '\0';
 }
 
 const char * get_dcim_dir_suffix()
@@ -716,12 +719,17 @@ int FIO_CopyFile(const char * src, const char * dst)
     if (!g) { FIO_CloseFile(f); return -1; }
 
     const int bufsize = MIN(FIO_GetFileSize_direct(src), 128*1024);
+    if (!bufsize) { FIO_CloseFile(f); FIO_CloseFile(g); return 0; }
     void* buf = fio_malloc(bufsize);
-    if (!buf) return -1;
+    if (!buf)
+    {
+        FIO_CloseFile(f); FIO_CloseFile(g); FIO_RemoveFile(dst);
+        return -1;
+    }
 
     int err = 0;
     int r = 0;
-    while ((r = FIO_ReadFile(f, buf, bufsize)))
+    while ((r = FIO_ReadFile(f, buf, bufsize)) > 0)
     {
         int w = FIO_WriteFile(g, buf, r);
         if (w != r)
@@ -731,6 +739,7 @@ int FIO_CopyFile(const char * src, const char * dst)
             break;
         }
     }
+    if (r < 0) err = 1;
 
     FIO_CloseFile(f);
     FIO_CloseFile(g);

@@ -122,7 +122,7 @@ static void vbr_fix(uint16_t param)
 // may be dangerous if mvr_config and numbers are incorrect
 static void opt_set(int num, int den)
 {
-#if defined(CONFIG_7D)
+#if defined(CONFIG_7D) && defined(FEATURE_NITRATE)
     uint32_t combo = 0;
     uint32_t entry = 0;
 

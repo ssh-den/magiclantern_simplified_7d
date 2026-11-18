@@ -871,8 +871,10 @@ static int hsp = 0;
 static int movie_af_reverse_dir_request = 0;
 PROP_HANDLER(PROP_HALF_SHUTTER)
 {
-    if (buf[0] && !hsp) movie_af_reverse_dir_request = 1;
-    hsp = buf[0];
+    if (!buf || len < sizeof(uint16_t)) return;
+    unsigned pressed=*(const uint16_t *)buf;
+    if (pressed && !hsp) movie_af_reverse_dir_request = 1;
+    hsp = pressed;
     hsp_countdown = 3;
     #ifdef FEATURE_MAGIC_ZOOM
     if (get_zoom_overlay_trigger_mode() <= 2) zoom_overlay_set_countdown(0);

@@ -205,6 +205,7 @@ static uint32_t get_picstyle_prop_ID(picstyle_index index)
 // Canon calls it PROP_FLAVOR_MODE, keeping our old name for readability.
 PROP_HANDLER(PROP_PICTURE_STYLE)
 {
+    if (!buf || len < sizeof(uint32_t)) return;
     const uint32_t raw = *(uint32_t *) buf;
     lens_info.raw_picstyle = raw;
     lens_info.picstyle = get_prop_picstyle_index(raw);
@@ -214,7 +215,7 @@ PROP_HANDLER(PROP_PICTURE_STYLE)
 //       This can be removed when general solution is implemented in property.c
 static void picstyle_settings_prop_handler(size_t len, uint32_t *buf, picstyle_index index)
 {
-    if(len != sizeof(*picstyle_settings)) return;
+    if (!buf || (unsigned)index >= NUM_PICSTYLES || len != sizeof(*picstyle_settings)) return;
     picstyle_settings_prop_sizes[index] = len;
     memcpy(&picstyle_settings[index], buf, sizeof(*picstyle_settings));
 }
@@ -295,19 +296,25 @@ PROP_HANDLER(PROP_PICSTYLE_SETTINGS_FINEDETAIL)
 PROP_HANDLER(PROP_PC_FLAVOR1_PARAM)
 {
     if(len < 54) return; // 50 chars at buf + 4
-    snprintf(user_picstyle_name_1, 50, "%s", (char*) buf + 4);
+    if (!buf) return;
+    memcpy(user_picstyle_name_1, (char*)buf + 4, sizeof(user_picstyle_name_1)-1);
+    user_picstyle_name_1[sizeof(user_picstyle_name_1)-1] = '\0';
 }
 
 PROP_HANDLER(PROP_PC_FLAVOR2_PARAM)
 {
     if(len < 54) return; // 50 chars at buf + 4
-    snprintf(user_picstyle_name_2, 50, "%s", (char*) buf + 4);
+    if (!buf) return;
+    memcpy(user_picstyle_name_2, (char*)buf + 4, sizeof(user_picstyle_name_2)-1);
+    user_picstyle_name_2[sizeof(user_picstyle_name_2)-1] = '\0';
 }
 
 PROP_HANDLER(PROP_PC_FLAVOR3_PARAM)
 {
     if(len < 54) return; // 50 chars at buf + 4
-    snprintf(user_picstyle_name_3, 50, "%s", (char*) buf + 4);
+    if (!buf) return;
+    memcpy(user_picstyle_name_3, (char*)buf + 4, sizeof(user_picstyle_name_3)-1);
+    user_picstyle_name_3[sizeof(user_picstyle_name_3)-1] = '\0';
 }
 
 // PROP_PICSTYLE_OF_USERDEFx keep a base picstyle ID assigned to user defined
@@ -406,7 +413,7 @@ picstyle_set_current_##param(int value) \
 }
 
 PICSTYLE_SET_PARAM_IN_CURRENT(contrast, -4, 4)
-PICSTYLE_SET_PARAM_IN_CURRENT(sharpness, -1, 7)
+PICSTYLE_SET_PARAM_IN_CURRENT(sharpness, 0, 7)
 PICSTYLE_SET_PARAM_IN_CURRENT(saturation, -4, 4)
 PICSTYLE_SET_PARAM_IN_CURRENT(color_tone, -4, 4)
 #if NUM_PICSTYLE_SLIDERS == 6

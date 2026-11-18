@@ -3936,7 +3936,7 @@ BMP_LOCK (
     //~ else
     {
         struct gui_task * current = gui_task_list.current;
-        struct dialog * dialog = current->priv;
+        struct dialog * dialog = current ? current->priv : NULL;
 
         if (dialog && streq(dialog->type, "DIALOG")) // if dialog seems valid
         {

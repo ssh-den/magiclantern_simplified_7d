@@ -636,7 +636,8 @@ static volatile int afframe_ack = 0;
 #ifdef CONFIG_LIVEVIEW
 static int afframe[128];
 PROP_HANDLER( PROP_LV_AFFRAME ) {
-    ASSERT(len <= sizeof(afframe));
+    if (!buf || len < 6 * sizeof(*buf) || len > sizeof(afframe)) return;
+    if (!buf[0] || !buf[1]) return;
     
     if (!lv)
     {

@@ -23,6 +23,7 @@
 
 
 #include "dryos.h"
+#include <stddef.h>
 #include "lens.h"
 #include "property.h"
 #include "bmp.h"
@@ -1396,13 +1397,21 @@ PROP_HANDLER( PROP_LENS_STATIC_DATA )
 
 PROP_HANDLER( PROP_LENS_NAME )
 {
-    if( len > sizeof(lens_info.name) )
-        len = sizeof(lens_info.name);
+    if (!buf) return;
+    if( len >= sizeof(lens_info.name) )
+        len = sizeof(lens_info.name) - 1;
     memcpy( (char*)lens_info.name, buf, len );
+    lens_info.name[len] = '\0';
 }
 
 PROP_HANDLER(PROP_LENS)
 {
+    if (!buf) return;
+#ifdef CONFIG_5DC
+    if (len < 4) return;
+#else
+    if (len < 9) return;
+#endif
     uint8_t* info = (uint8_t *) buf;
     
     #ifdef CONFIG_5DC
@@ -1422,10 +1431,11 @@ PROP_HANDLER(PROP_LENS)
     lens_info.lens_id = (info[3] << 8) | info[4];
     lens_info.lens_focal_min = (info[5] << 8) | info[6];
     lens_info.lens_focal_max = (info[7] << 8) | info[8];
-    lens_info.lens_extender = info[0xE];
+    /* 7D delivers 14 bytes; its optional extender byte is not present. */
+    lens_info.lens_extender = len > 0xE ? info[0xE] : 0;
     
     /* not all models support this feature */
-    if(len >= 0x1C)
+    if(len >= 0x1D)
     {
         lens_info.lens_version = (info[0x19] << 16) | (info[0x1A] << 8) | info[0x1B];
         lens_info.lens_capabilities = info[0x1C];
@@ -1435,7 +1445,7 @@ PROP_HANDLER(PROP_LENS)
              info[0x18]        |
             (info[0x17] << 8)  |
             (info[0x16] << 16) |
-            (info[0x15] << 24) ;
+            ((uint32_t)info[0x15] << 24) ;
         uint32_t lens_serial_hi = 
              info[0x14]        ;
         lens_info.lens_serial = 
@@ -1730,7 +1740,7 @@ PROP_HANDLER( PROP_WB_KELVIN_LV )
 static uint16_t custom_wb_gains[128];
 PROP_HANDLER(PROP_CUSTOM_WB)
 {
-    ASSERT(len <= sizeof(custom_wb_gains));
+    if (!buf || len < 40 || len > sizeof(custom_wb_gains)) return;
     memcpy(custom_wb_gains, buf, len);
     const uint16_t * gains = (uint16_t *) buf;
     lens_info.WBGain_R = gains[16];
@@ -1899,8 +1909,8 @@ static struct prop_lv_lens lv_lens_raw;
 
 PROP_HANDLER( PROP_LV_LENS )
 {
-    ASSERT(len <= sizeof(struct prop_lv_lens));
-    memcpy(&lv_lens_raw, buf, sizeof(struct prop_lv_lens));
+    if (!buf || len < offsetof(struct prop_lv_lens, focus_dist) + sizeof(lv_lens_raw.focus_dist)) return;
+    memcpy(&lv_lens_raw, buf, MIN(len, sizeof(lv_lens_raw)));
 
     const struct prop_lv_lens * const lv_lens = (void*) buf;
     lens_info.focal_len     = bswap16( lv_lens->focal_len );

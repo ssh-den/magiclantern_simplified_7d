@@ -92,8 +92,8 @@ static int my_init_task(int a, int b, int c, int d)
 #ifdef ARMLIB_OVERFLOWING_BUFFER
     // Restore the overwritten value.
     // Refuse to boot if ARMLIB_OVERFLOWING_BUFFER is incorrect.
-    qprintf("[BOOT] %X now contains %X, restoring %X.\n", backup_address, *backup_address, backup_data);
     while (backup_address == 0);
+    qprintf("[BOOT] %X now contains %X, restoring %X.\n", backup_address, *backup_address, backup_data);
     while (*backup_address == 0xbaaabaaa);
     *backup_address = backup_data;
 #endif

@@ -1150,4 +1150,6 @@ static void vignetting_init (void * parm)
 }
 
 INIT_FUNC("lv_img", lv_img_init);
+#ifdef FEATURE_VIGNETTING_CORRECTION
 TASK_CREATE( "vignetting_init", vignetting_init, 0, 0x1e, 0x2000 );
+#endif

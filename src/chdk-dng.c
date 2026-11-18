@@ -759,7 +759,10 @@ static int32_t write_dng(FILE* fd, struct raw_info * raw_info)
 #ifdef CONFIG_MAGICLANTERN
 PROP_HANDLER(PROP_CAM_MODEL)
 {
-    snprintf(cam_name, sizeof(cam_name), (const char *)buf);
+    if (!buf) return;
+    if (len >= sizeof(cam_name)) len = sizeof(cam_name) - 1;
+    memcpy(cam_name, buf, len);
+    cam_name[len] = '\0';
 }
 #endif
 

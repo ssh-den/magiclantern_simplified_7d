@@ -221,7 +221,7 @@ static int FAST stateobj_lv_spy(struct state_object * self, int x, int input, in
         vsync_func();
     }
     
-    #if defined(CONFIG_7D_MASTER) || defined(CONFIG_7D)
+    #if (defined(CONFIG_7D_MASTER) || defined(CONFIG_7D)) && defined(FEATURE_VIGNETTING_CORRECTION)
     if (self == LV_STATE && input==3 && old_state == 3) {
         extern void vignetting_correction_apply_lvmgr(int);
         vignetting_correction_apply_lvmgr(x);

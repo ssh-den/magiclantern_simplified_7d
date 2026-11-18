@@ -15,7 +15,10 @@ static int check_key = 0;
 
 PROP_HANDLER(PROP_FILE_PREFIX)
 {
-    snprintf(file_prefix, sizeof(file_prefix), "%s", (const char *)buf);
+    if (!buf || !len) return;
+    if (len >= sizeof(file_prefix)) len = sizeof(file_prefix) - 1;
+    memcpy(file_prefix, buf, len);
+    file_prefix[len] = '\0';
     prop_handler_check = 1;
 }
 

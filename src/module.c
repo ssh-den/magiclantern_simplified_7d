@@ -15,7 +15,7 @@
 #ifndef CONFIG_MODULES_MODEL_SYM
 #error Not defined file name with symbols
 #endif
-#define MAGIC_SYMBOLS                 "ML/MODULES/"CONFIG_MODULES_MODEL_SYM
+#define MAGIC_SYMBOLS                 MODULE_PATH CONFIG_MODULES_MODEL_SYM
 
 /* unloads TCC after linking the modules */
 /* note: this breaks module_exec and ETTR */
@@ -52,7 +52,6 @@ static int module_load_symbols(TCCState *s, char *filename)
     uint32_t size = 0;
     FILE* file = NULL;
     char *buf = NULL;
-    uint32_t count = 0;
     uint32_t pos = 0;
 
     if( FIO_GetFileSize( filename, &size ) != 0 )
@@ -60,6 +59,7 @@ static int module_load_symbols(TCCState *s, char *filename)
         printf("Error loading '%s': File does not exist\n", filename);
         return -1;
     }
+    if (!size || size > 0x7FFFFFFF) return -1;
     buf = fio_malloc(size);
     if(!buf)
     {
@@ -74,59 +74,41 @@ static int module_load_symbols(TCCState *s, char *filename)
         fio_free(buf);
         return -1;
     }
-    FIO_ReadFile(file, buf, size);
+    int read = FIO_ReadFile(file, buf, size);
     FIO_CloseFile(file);
+    if (read != (int)size) { fio_free(buf); return -1; }
 
-    while(pos < size && buf[pos])
+    while (pos < size)
     {
-        char address_buf[16];
+        while (pos < size && (buf[pos] == '\r' || buf[pos] == '\n')) pos++;
+        if (pos == size) break;
+        char address_buf[9];
         char symbol_buf[128];
         uint32_t length = 0;
-        uint32_t address = 0;
-
-        while (pos + length < size &&
-               buf[pos + length] &&
-               buf[pos + length] != ' ' &&
-               length < sizeof(address_buf))
-        {
-            address_buf[length] = buf[pos + length];
-            length++;
+        while (pos < size && isxdigit((unsigned char)buf[pos])) {
+            if (length + 1 >= sizeof(address_buf)) goto invalid;
+            address_buf[length++] = buf[pos++];
         }
-        address_buf[length] = '\000';
-
-        pos += length + 1;
+        address_buf[length] = 0;
+        if (!length || pos == size || (buf[pos] != ' ' && buf[pos] != '\t')) goto invalid;
+        while (pos < size && (buf[pos] == ' ' || buf[pos] == '\t')) pos++;
         length = 0;
-
-        while (pos + length < size &&
-               buf[pos + length] &&
-               buf[pos + length] != '\r' &&
-               buf[pos + length] != '\n' &&
-               length < sizeof(symbol_buf))
-        {
-            symbol_buf[length] = buf[pos + length];
-            length++;
+        while (pos < size && buf[pos] != '\r' && buf[pos] != '\n') {
+            if (length + 1 >= sizeof(symbol_buf) || (unsigned char)buf[pos] <= ' ' ||
+                (unsigned char)buf[pos] > '~') goto invalid;
+            symbol_buf[length++] = buf[pos++];
         }
-        symbol_buf[length] = '\000';
-
-        pos += length + 1;
-        length = 0;
-
-        while (pos + length < size &&
-               buf[pos + length] &&
-              (buf[pos + length] == '\r' ||
-               buf[pos + length] == '\n'))
-        {
-            pos++;
-        }
-        //~ sscanf(address_buf, "%x", &address);
-        address = strtoul(address_buf, NULL, 16);
-
-        tcc_add_symbol(s, symbol_buf, (void*)address);
-        count++;
+        if (!length) goto invalid;
+        symbol_buf[length] = 0;
+        if (tcc_add_symbol(s, symbol_buf, (void*)(uintptr_t)strtoul(address_buf, NULL, 16)) < 0)
+            goto invalid;
     }
     
     fio_free(buf);
     return 0;
+invalid:
+    fio_free(buf);
+    return -1;
 }
 
 // Modules are invisible if they have a .hid file of their name,
@@ -508,7 +490,21 @@ struct TCCState {
 
 #endif
 
-static void _module_load_all(uint32_t list_only)
+#ifdef CONFIG_TCC_UNLOAD
+static int module_relocate(TCCState *state)
+{
+    int size = tcc_relocate(state, NULL);
+    if (size <= 0) return -1;
+    void *buf = malloc(size);
+    if (!buf) return -1;
+    int result = tcc_relocate(state, buf);
+    if (result < 0) free(buf);
+    else module_code = buf;
+    return result;
+}
+#endif
+
+static int _module_load_all(uint32_t list_only)
 {
     TCCState *state = NULL;
     uint32_t module_cnt = 0;
@@ -532,17 +528,18 @@ static void _module_load_all(uint32_t list_only)
     {
         printf("Modules already loaded.\n");
         beep();
-        return;
+        return -1;
     }
 
     /* initialize linker */
     state = tcc_new();
+    if (!state) return -2;
     tcc_set_options(state, "-nostdlib");
     if(module_load_symbols(state, MAGIC_SYMBOLS) < 0)
     {
         NotifyBox(2000, "Missing symbol file: " MAGIC_SYMBOLS );
         tcc_delete(state); console_show();
-        return;
+        return -3;
     }
 
     printf("Scanning modules...\n");
@@ -551,7 +548,7 @@ static void _module_load_all(uint32_t list_only)
     {
         NotifyBox(2000, "Module dir missing" );
         tcc_delete(state); console_show();
-        return;
+        return -4;
     }
 
     do
@@ -655,7 +652,7 @@ static void _module_load_all(uint32_t list_only)
     if(list_only)
     {
         tcc_delete(state);
-        return;
+        return 0;
     }
     
     /* load modules */
@@ -699,7 +696,7 @@ static void _module_load_all(uint32_t list_only)
             {
                 module_list[mod].error = 1;
                 snprintf(module_list[mod].status, sizeof(module_list[mod].status), "FileErr");
-                snprintf(module_list[mod].long_status, sizeof(module_list[mod].long_status), "Load failed: %s, ret 0x%02X");
+                snprintf(module_list[mod].long_status, sizeof(module_list[mod].long_status), "Load failed: %s, ret 0x%02X", module_list[mod].filename, ret);
                 printf("  [E] %s\n", module_list[mod].long_status);
             }
         }
@@ -707,21 +704,11 @@ static void _module_load_all(uint32_t list_only)
 
     printf("Linking..\n");
 #ifdef CONFIG_TCC_UNLOAD
-    int32_t size = tcc_relocate(state, NULL);
-    int32_t reloc_status = -1;
-    
-    if (size > 0)
-    {
-        void* buf = (void*) malloc(size);
-        
-        reloc_status = tcc_relocate(state, buf);
-        module_code = buf;
-    }
-    if(size < 0 || reloc_status < 0)
+    int32_t ret = module_relocate(state);
 #else
     int32_t ret = tcc_relocate(state, TCC_RELOCATE_AUTO);
-    if(ret < 0)
 #endif
+    if (ret < 0)
     {
         printf("  [E] failed to link modules\n");
         for (uint32_t mod = 0; mod < module_cnt; mod++)
@@ -734,7 +721,7 @@ static void _module_load_all(uint32_t list_only)
             }
         }
         tcc_delete(state); console_show();
-        return;
+        return -5;
     }
     
     /* load modules symbols */
@@ -904,6 +891,7 @@ static void _module_load_all(uint32_t list_only)
     #endif
     
     printf("Modules loaded\n");
+    return 0;
 }
 
 static void _module_unload_all(void)
@@ -943,6 +931,7 @@ void* module_load(char *filename)
     TCCState *state = NULL;
 
     state = tcc_new();
+    if (!state) return NULL;
     tcc_set_options(state, "-nostdlib");
 
     if(module_load_symbols(state, MAGIC_SYMBOLS) < 0)
@@ -1607,7 +1596,7 @@ static void module_menu_update()
         /* only update those which display module information */
         if(entry->update == module_menu_update_entry)
         {
-            ASSERT(i == (int)entry->priv);
+            ASSERT(i == (intptr_t)entry->priv);
             module_entry_t *mod = &module_list[i];
 
             MENU_SET_SHIDDEN(1);
@@ -2069,6 +2058,7 @@ static struct menu_entry module_debug_menu[] = {
         },
     },
 };
+
 
 struct config_var * module_get_config_var(const char * name)
 {

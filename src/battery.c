@@ -53,7 +53,8 @@ PROP_HANDLER(PROP_BATTERY_REPORT) // also in memory address 7D.203: 7AF60, lengt
 
 PROP_HANDLER(PROP_BATTERY_HISTORY) // also in memory address 7D.203: 7AFC0, length 76 bytes
 {
-    bat_info.num_of_hist = buf[0];
+    if (!buf || len < sizeof(*buf)) return;
+    bat_info.num_of_hist = MIN(MIN(buf[0],6), (len / sizeof(*buf) - 1) / 3);
     bat_info.act_hist = 0;
     for (int i=0;i<MIN(bat_info.num_of_hist,6);i++) 
     {

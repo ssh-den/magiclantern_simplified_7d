@@ -66,8 +66,9 @@ static int afp[2];
 static int afp_len = 0;
 PROP_HANDLER(PROP_AFPOINT)
 {
-    afp[0] = buf[0];
-    afp[1] = buf[1];
+    if (!buf || len < sizeof(afp[0]) || len > sizeof(afp)) return;
+    memset(afp,0,sizeof(afp));
+    memcpy(afp,buf,len);
     afp_len = len;
 }
 #define af_point afp[0]
