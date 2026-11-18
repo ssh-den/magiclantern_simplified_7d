@@ -8,7 +8,10 @@
 #include "raw.h"
 #include "../file_man/file_man.h"
 #include "../silent/lossless.h"
+#include "../silent/lj92-preview.h"
 #include "imgconv.h"
+
+extern __typeof__(lossless_decompress_raw) lossless_decompress_raw __attribute__((weak));
 
 #define T_BYTE      1
 #define T_ASCII     2
@@ -23,17 +26,23 @@
 #define T_FLOAT     11
 #define T_DOUBLE    12
 
-static int tif_parse_ifd(int id, char* buf, int off, int* strip_offset, int* strip_byte_count, int* compression)
+static int tif_parse_ifd(const char *buf, unsigned length, unsigned off, int subifd,
+                         unsigned *strip_offset, unsigned *strip_byte_count, int *compression)
 {
-    int entries = *(short*)(buf+off); off += 2;
-    //~ printf("ifd %d: (%d)\n", id, entries);
+    if (length < 6 || off > length - 6 || (off & 1)) return -1;
+    uint16_t entries;
+    memcpy(&entries, buf + off, sizeof(entries));
+    off += sizeof(entries);
+    if (entries > (length - off - 4) / 12) return -1;
     int imagetype = -1;
     for (int i = 0; i < entries; i++)
     {
-        unsigned int tag = *(unsigned short*)(buf+off); off += 2;
-        unsigned int type = *(unsigned short*)(buf+off); off += 2; (void)type;
-        unsigned int count = *(unsigned int*)(buf+off); off += 4; (void)count;
-        unsigned int data = *(unsigned int*)(buf+off); off += 4;
+        uint16_t tag;
+        uint32_t count, data;
+        memcpy(&tag, buf + off, 2);
+        memcpy(&count, buf + off + 4, 4);
+        memcpy(&data, buf + off + 8, 4);
+        off += 12;
         //~ printf("%x %x %x %d\n", tag, type, count, data);
         
         switch (tag)
@@ -44,7 +53,9 @@ static int tif_parse_ifd(int id, char* buf, int off, int* strip_offset, int* str
             
             case 0x14A: /* SubIFD */
                 //~ printf("subifd: %x\n", data);
-                tif_parse_ifd(id+10, buf, data, strip_offset, strip_byte_count, compression);
+                if (subifd || count != 1 || !data ||
+                    tif_parse_ifd(buf, length, data, 1, strip_offset, strip_byte_count, compression) < 0)
+                    return -1;
                 break;
         }
         
@@ -80,16 +91,17 @@ static int tif_parse_ifd(int id, char* buf, int off, int* strip_offset, int* str
                     break;
                 case 0xC68D: /* active area */
                 {
-                    int* area = (void*)buf + data;
+                    if (count != 4 || data > length || length - data < 16) return -1;
                     //~ printf("crop: %d %d %d %d\n", area[0], area[1], area[2], area[3]);
-                    memcpy(&raw_info.active_area, area, 4 * 4);
+                    memcpy(&raw_info.active_area, buf + data, 16);
                     break;
                 }
             }
         }
     }
-    unsigned int next = *(unsigned int*)(buf+off); off += 4;
-    return next;
+    uint32_t next;
+    memcpy(&next, buf + off, sizeof(next));
+    return next <= length ? (int)next : -1;
 }
 
 static void FAST reverse_bytes_order(char* buf, int count)
@@ -110,17 +122,19 @@ static int dng_show(char* filename)
     if( FIO_GetFileSize( filename, &size ) != 0 ) return 0;
 
     FILE* f = FIO_OpenFile(filename, O_RDONLY | O_SYNC);
+    if (IS_ERROR(f)) return 0;
     void* buf = 0;
+    struct memSuite *src_suite = 0;
 
     /* should be big enough for the header */
-    int header_maxsize = 65536;
+    unsigned header_maxsize = MIN(size, 65536);
     int* header = fio_malloc(header_maxsize);
-    if (!header) return 0;
+    if (!header || header_maxsize < 8) goto err;
 
     int rc = FIO_ReadFile(f, header, header_maxsize);
-    if( rc != header_maxsize ) goto err;
+    if (rc != (int)header_maxsize) goto err;
 
-    if (header[0] != 0x002A4949 && header[1] != 0x00000008)
+    if (header[0] != 0x002A4949 || header[1] != 0x00000008)
     {
         bmp_printf(FONT_MED, 0, 0, "Not a CHDK DNG");
         goto err;
@@ -128,45 +142,67 @@ static int dng_show(char* filename)
 
     raw_info.width = 0;
     raw_info.height = 0;
+    memset(&raw_info.active_area, 0, sizeof(raw_info.active_area));
     
-    int strip_offset = 0;
-    int strip_byte_count = 0;
+    unsigned strip_offset = 0;
+    unsigned strip_byte_count = 0;
     int compression = 0;
 
     int off = 8;
-    for (int ifd = 0; off; ifd++)
+    for (int ifd = 0; off > 0 && ifd < 8; ifd++)
     {
-        off = tif_parse_ifd(ifd, (void*)header, off, &strip_offset, &strip_byte_count, &compression);
+        off = tif_parse_ifd((void*)header, header_maxsize, off, 0, &strip_offset, &strip_byte_count, &compression);
     }
+    if (off) goto err;
 
     fio_free(header); header = 0;
 
-    if (!strip_offset) goto err;
-    if (!raw_info.width) goto err;
-    if (!raw_info.height) goto err;
+    if (!strip_offset || strip_offset > size || strip_byte_count > size - strip_offset) goto err;
+    if (raw_info.width <= 0 || raw_info.width > 16384 || (raw_info.width & 7) ||
+        raw_info.height <= 0 || raw_info.height > 16384) goto err;
+    if (!raw_info.active_area.x2 || !raw_info.active_area.y2)
+    {
+        raw_info.active_area.x2 = raw_info.width;
+        raw_info.active_area.y2 = raw_info.height;
+    }
+    if (raw_info.active_area.x1 < 0 || raw_info.active_area.x2 > raw_info.width ||
+        raw_info.active_area.x1 >= raw_info.active_area.x2 ||
+        raw_info.active_area.y1 < 0 || raw_info.active_area.y2 > raw_info.height ||
+        raw_info.active_area.y1 >= raw_info.active_area.y2) goto err;
 
-    int raw_size = raw_info.width * raw_info.height * 14/8;
+    int raw_size = (raw_info.width / 8) * raw_info.height * 14;
     buf = fio_malloc(raw_size);
     if (!buf) goto err;
 
-    FIO_SeekSkipFile(f, strip_offset, SEEK_SET);
+    if (FIO_SeekSkipFile(f, strip_offset, SEEK_SET) < 0) goto err;
 
-    if (compression == 7)
+    if (compression == 7 && (!lossless_decompress_raw || is_camera("7D", "*")))
     {
-        struct memSuite * src_suite = shoot_malloc_suite_contig(strip_byte_count);
+        if (!lj92_decode_file(f, strip_byte_count, buf, raw_size, raw_info.width, raw_info.height, 14, 14))
+        {
+            NotifyBox(3000, "Cannot decode lossless DNG");
+            goto err;
+        }
+    }
+    else if (compression == 7)
+    {
+        if (!strip_byte_count || strip_byte_count > 0x7fffffff) goto err;
+        src_suite = shoot_malloc_suite_contig(strip_byte_count);
         if (!src_suite) goto err;
 
         void * src = GetMemoryAddressOfMemoryChunk(GetFirstChunkFromSuite(src_suite));
-        rc = FIO_ReadFile(f, src, raw_size);
-        if (rc != strip_byte_count) goto err;
+        rc = FIO_ReadFile(f, src, strip_byte_count);
+        if (rc != (int)strip_byte_count) goto err;
 
         int r = lossless_decompress_raw(src_suite, buf, raw_info.width, raw_info.height, 14);
         if (r) goto err;
 
         shoot_free_suite(src_suite);
+        src_suite = 0;
     }
     else
     {
+        if (compression != 1 || strip_byte_count < (unsigned)raw_size) goto err;
         rc = FIO_ReadFile(f, buf, raw_size);
         if (rc != raw_size) goto err;
 
@@ -179,6 +215,7 @@ static int dng_show(char* filename)
     FIO_CloseFile(f); f = 0;
 
     raw_info.buffer = buf;
+    raw_info.bits_per_pixel = 14;
     raw_set_geometry(raw_info.width, raw_info.height, raw_info.active_area.x1, raw_info.width - raw_info.active_area.x2, raw_info.active_area.y1, raw_info.height - raw_info.active_area.y2);
     raw_force_aspect_ratio(1, 1);
 
@@ -191,6 +228,7 @@ static int dng_show(char* filename)
     return 1;
 err:
     if (f) FIO_CloseFile(f);
+    if (src_suite) shoot_free_suite(src_suite);
     if (header) free(header);
     if (buf) free(buf);
     raw_set_dirty();
@@ -271,6 +309,7 @@ static int ppm_show(char* filename)
     uint32_t size;
     if( FIO_GetFileSize( filename, &size ) != 0 ) return 0;
     char * buf = fio_malloc(size);
+    if (!buf) return 0;
 
     size_t rc = read_file( filename, buf, size );
     if( rc != size ) goto err;
@@ -281,7 +320,7 @@ static int ppm_show(char* filename)
 
     /* only ML screenshots are supported for now, to keep things simple */
     char* ml_header = "P6\n720 480\n255\n";
-    if (strncmp(buf, ml_header, strlen(ml_header)))
+    if (size != strlen(ml_header) + 720 * 480 * 3 || strncmp(buf, ml_header, strlen(ml_header)))
         goto err;
     
     char* rgb = buf + strlen(ml_header);

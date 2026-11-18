@@ -46,6 +46,7 @@
 #include "../../lv_rec/lv_rec.h"
 #include "../../raw_twk/raw_twk.h"
 #include "../../silent/lossless.h"
+#include "../../silent/lj92-preview.h"
 #include "console.h"
 
 /* uncomment for live debug messages */
@@ -1699,6 +1700,8 @@ static void mlv_play_start_fps_timer(uint32_t fps_nom, uint32_t fps_denom)
 }
 
 
+extern __typeof__(lossless_decompress_raw) lossless_decompress_raw __attribute__((weak));
+
 static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_count)
 {
     uint32_t fps_timer_started = 0;
@@ -1713,6 +1716,9 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
 
     void *mlv_play_decomp_buf = NULL;
     struct memSuite *mlv_play_decomp_suite = NULL;
+    unsigned decomp_capacity = 0;
+    int software_lj92 = !lossless_decompress_raw || is_camera("7D", "*");
+    frame_buf_t *buffer = NULL;
 
     /* read footer information and update global variables, will seek automatically */
     if(chunk_count < 1 || !mlv_play_is_mlv(chunk_files[0]))
@@ -1880,8 +1886,14 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                 break;
             }
             
-            frame_size = rawi_block.xRes * rawi_block.yRes * rawi_block.raw_info.bits_per_pixel / 8;
             bits_per_pixel = rawi_block.raw_info.bits_per_pixel;
+            if (!rawi_block.xRes || (rawi_block.xRes & 7) || rawi_block.xRes > 16384 ||
+                !rawi_block.yRes || rawi_block.yRes > 16384 || bits_per_pixel < 8 || bits_per_pixel > 16)
+            {
+                NotifyBox(3000, "Invalid MLV RAW dimensions");
+                break;
+            }
+            frame_size = (rawi_block.xRes / 8) * rawi_block.yRes * bits_per_pixel;
         }
         else if(!memcmp(buf.blockType, "WAVI", 4))
         {
@@ -1909,7 +1921,22 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                 break;
             }
         
-            frame_buf_t *buffer = NULL;
+            unsigned header_bytes = sizeof(vidf_block);
+            if (!frame_size || vidf_block.blockSize <= header_bytes ||
+                vidf_block.frameSpace >= vidf_block.blockSize - header_bytes)
+            {
+                NotifyBox(3000, "Invalid MLV frame size");
+                break;
+            }
+            unsigned payload_bytes = vidf_block.blockSize - header_bytes - vidf_block.frameSpace;
+            int compressed = main_header.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92;
+            int output_bpp = raw_twk_available() ? 16 : 14;
+            if ((!compressed && payload_bytes < frame_size) ||
+                FIO_SeekSkipFile(in_file, position + header_bytes + vidf_block.frameSpace, SEEK_SET) < 0)
+            {
+                NotifyBox(3000, "Invalid MLV frame data");
+                break;
+            }
             
             /* now get a buffer from the queue */
             while (msg_queue_receive(mlv_play_queue_empty, &buffer, 100) && !mlv_play_should_stop());
@@ -1920,12 +1947,14 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                 if(buffer)
                 {
                     msg_queue_post(mlv_play_queue_empty, (uint32_t) buffer);
+                    buffer = NULL;
                 }
                 break;
             }
             
-            /* check if the queued buffer has the correct size */
-            if(buffer->frameSize != frame_size)
+            unsigned capacity = compressed ? (rawi_block.xRes / 8u) * rawi_block.yRes * output_bpp : frame_size;
+            /* The queued buffer tracks its actual capacity, excluding alignment. */
+            if(buffer->frameSize != capacity)
             {
                 /* the first few queued don't have anything allocated, so don't free */
                 if(buffer->frameBuffer)
@@ -1933,8 +1962,8 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                     fio_free(buffer->frameBuffer);
                 }
                 
-                buffer->frameSize = frame_size;
-                buffer->frameBuffer = fio_malloc(buffer->frameSize * 16 / 14 + 0x1000);
+                buffer->frameSize = capacity;
+                buffer->frameBuffer = fio_malloc(capacity + 0x1000);
                 buffer->frameBufferAligned = (void *) (((uint32_t)buffer->frameBuffer + 0x1000) & ~0xFFF);
             }
 
@@ -1946,16 +1975,25 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                 break;
             }
             
-            int32_t read_size = MIN(frame_size, vidf_block.blockSize - (sizeof(mlv_vidf_hdr_t) + vidf_block.frameSpace));
+            int32_t read_size = MIN(frame_size, payload_bytes);
             void *read_buffer = buffer->frameBufferAligned;
             
             /* when we have LJ92 compressed video, read into a different buffer, decompressor will store it in the other one */
-            if(main_header.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92)
+            if (compressed && !software_lj92)
             {
-                /* none allocated yet? do so */
-                if(!mlv_play_decomp_buf)
+                if (payload_bytes > frame_size)
                 {
-                    int mem_size = (buffer->frameSize + 0x1000) & ~0xFFF;
+                    NotifyBox(3000, "Compressed frame exceeds hardware buffer");
+                    break;
+                }
+                if (decomp_capacity < frame_size)
+                {
+                    if (mlv_play_decomp_suite) DeleteMemorySuite(mlv_play_decomp_suite);
+                    if (mlv_play_decomp_buf) fio_free(mlv_play_decomp_buf);
+                    mlv_play_decomp_suite = NULL;
+                    mlv_play_decomp_buf = NULL;
+                    decomp_capacity = 0;
+                    int mem_size = (frame_size + 0x1000) & ~0xFFF;
                     
                     /* keep in mind the address must be aligned, alloc a few k more */
                     mlv_play_decomp_buf = fio_malloc(mem_size + 0x1000);
@@ -1963,7 +2001,7 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                     {
                         bmp_printf(FONT_MED, 20, 100, "failed to alloc mlv_play_decomp_buf");
                         msleep(10000);
-                        return;
+                        break;
                     }
                     
                     mlv_play_decomp_suite = CreateMemorySuite(mlv_play_decomp_buf, mem_size, 0);
@@ -1971,28 +2009,17 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                     {
                         bmp_printf(FONT_MED, 20, 100, "(failed inSuite)");
                         msleep(10000);
-                        return;
+                        break;
                     }
+                    decomp_capacity = frame_size;
                 }
                 
                 /* reading into this one */
                 read_buffer = mlv_play_decomp_buf;
             }
             
-            /* safety check to make sure the format matches, but allow the saved block to be larger (some dummy data at the end of frame is allowed) */
-            if((uint32_t)read_size > buffer->frameSize)
-            {
-                bmp_printf(FONT_MED, 30, 400, "ERROR 0x%X 0x%X 0x%X 0x%X 0x%X", read_size, frame_size, buffer->frameSize, vidf_block.frameSpace, vidf_block.blockSize);
-                beep();
-                msleep(10000);
-                break;
-            } 
-            
-            /* skip frame space */
-            FIO_SeekSkipFile(in_file, position + sizeof(mlv_vidf_hdr_t) + vidf_block.frameSpace, SEEK_SET);
-
             /* finally read the raw data */
-            if(FIO_ReadFile(in_file, read_buffer, read_size) != (int32_t)read_size)
+            if ((!compressed || !software_lj92) && FIO_ReadFile(in_file, read_buffer, read_size) != read_size)
             {
                 bmp_printf(FONT_MED, 30, 190, "File ends prematurely during VIDF raw data");
                 beep();
@@ -2007,28 +2034,27 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
             buffer->blackLevel = rawi_block.raw_info.black_level;
             buffer->whiteLevel = rawi_block.raw_info.white_level;
 
-            if(main_header.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92)
+            if (compressed)
             {
-                int output_bpp = raw_twk_available() ? 16 : 14;
-                int r = lossless_decompress_raw(
-                    mlv_play_decomp_suite, buffer->frameBufferAligned,
-                    rawi_block.xRes, rawi_block.yRes, 
-                    output_bpp
-                );
-
-                if (r == -1)
+                int ok = software_lj92 ? lj92_decode_file(in_file, payload_bytes,
+                    buffer->frameBufferAligned, capacity, rawi_block.xRes, rawi_block.yRes, bits_per_pixel, output_bpp)
+                    : lossless_decompress_raw(mlv_play_decomp_suite, buffer->frameBufferAligned,
+                                              rawi_block.xRes, rawi_block.yRes, output_bpp) == 0;
+                if (!ok)
                 {
-                    bmp_printf(FONT_MED, 20, 300, "(no decompression on this model)");
+                    NotifyBox(3000, "Cannot decode lossless MLV frame");
+                    break;
                 }
 
                 /* when we have lossless data, we decompressed it already to 16 bpp for raw_twk */
-                if (output_bpp == 16)
+                if (output_bpp > bits_per_pixel && (software_lj92 || output_bpp == 16))
                 {
                     /* also raise black and white levels */
-                    buffer->blackLevel = rawi_block.raw_info.black_level << (16 - rawi_block.raw_info.bits_per_pixel);
-                    buffer->whiteLevel = rawi_block.raw_info.white_level << (16 - rawi_block.raw_info.bits_per_pixel);
-                    buffer->bitDepth = 16;
+                    unsigned scale = 1u << (output_bpp - bits_per_pixel);
+                    buffer->blackLevel *= scale;
+                    buffer->whiteLevel *= scale;
                 }
+                buffer->bitDepth = output_bpp;
             }
             
             if((main_header.videoClass & 0x0F) != MLV_VIDEO_CLASS_RAW)
@@ -2097,6 +2123,7 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                         if(mlv_play_should_stop())
                         {
                             msg_queue_post(mlv_play_queue_empty, (uint32_t) buffer);
+                            break;
                         }
                         else
                         {
@@ -2108,11 +2135,18 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
                         break;
                     }
                 }
+                buffer = NULL;
+            }
+            if (buffer)
+            {
+                msg_queue_post(mlv_play_queue_empty, (uint32_t) buffer);
+                buffer = NULL;
             }
         }
         block_xref_pos++;
     }
     
+    if (buffer) msg_queue_post(mlv_play_queue_empty, (uint32_t) buffer);
     if(fps_timer_started)
     {
         mlv_play_stop_fps_timer();
@@ -2120,17 +2154,11 @@ static void mlv_play_mlv(char *filename, FILE **chunk_files, uint32_t chunk_coun
     free(block_xref);
     
     /* free decompression stuff if needed */
-    if(mlv_play_decomp_buf)
-    {
-        free(mlv_play_decomp_buf);
-        mlv_play_decomp_buf = NULL;
-    }
-    
     if(mlv_play_decomp_suite)
     {
         DeleteMemorySuite(mlv_play_decomp_suite);
-        mlv_play_decomp_suite = NULL;
     }
+    if (mlv_play_decomp_buf) fio_free(mlv_play_decomp_buf);
 }
 
 static void mlv_play_raw(char *filename, FILE **chunk_files, uint32_t chunk_count)
